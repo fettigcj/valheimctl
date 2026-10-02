@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+echo "{\"player_count\": ${FAKE_PLAYERS:-0}}"

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Minimal docker stub for tests: stores containers as env files under $FAKE_STATE.
+S=${FAKE_STATE:?}; mkdir -p "$S"
+cmd=$1; shift
+case $cmd in
+  inspect)
+    name=; fmt=
+    while [[ $# -gt 0 ]]; do case $1 in -f|--format) fmt=$2; shift 2;; *) name=$1; shift;; esac; done
+    [[ -f $S/$name.env ]] || exit 1
+    case $fmt in
+      *Config.Env*) cat "$S/$name.env";;
+      *State.Running*) echo true;; *State.Status*StartedAt*) echo "running since now";; *State.Status*) echo running;;
+      *) echo '{}';;
+    esac;;
+  run)
+    name=; : >"$S/.tmp"
+    while [[ $# -gt 0 ]]; do case $1 in --name) name=$2; shift 2;; -e) echo "$2" >>"$S/.tmp"; shift 2;;
+      -p|-v|--restart|--cap-add|--log-opt) echo "$1 $2" >>"$S/$name.args" 2>/dev/null; shift 2;; -d) shift;; *) shift;; esac; done
+    mv "$S/.tmp" "$S/$name.env"; echo fakeid;;
+  stop) :;; rm) rm -f "$S/$1.env";;
+  logs) echo "01:00:00: Game server connected";;
+  exec) echo "exec $*" >>"$S/exec.log";;
+  stats) for f in "$S"/*.env; do [[ -e $f ]] && echo "$(basename "$f" .env) 1.2GiB / 16GiB"; done;;
+  pull) :;; image) echo sha256:fake;;
+  *) echo "fakedocker: unsupported $cmd" >&2; exit 2;;
+esac

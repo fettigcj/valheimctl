@@ -1,0 +1,4 @@
+*.tgz
+*.dll
+*.pass
+/tmp/

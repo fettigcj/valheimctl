@@ -1,0 +1,421 @@
+#!/usr/bin/env bash
+# valheimctl - manage a small fleet of lloesche/valheim-server Docker worlds.
+# Config lives in files (see README.md), never in this script. Needs bash >= 4.3.
+set -euo pipefail
+
+ETC="${VALHEIMCTL_ETC:-/etc/valheim}"
+DATA="${VALHEIMCTL_DATA:-/home/valheimServers}"
+DOCKER="${VALHEIMCTL_DOCKER:-docker}"
+BACKUPS="$DATA/_backups"
+BACKUP_KEEP="${VALHEIMCTL_BACKUP_KEEP:-10}"
+WAIT_SECS="${VALHEIMCTL_WAIT:-300}"
+DEFAULT_IMAGE="lloesche/valheim-server:latest"
+
+DRY=0 YES=0 FORCE=0 NEWWORLD=0 PULL=0 NOAPPLY=0 ALL=0
+
+die()  { echo "valheimctl: $*" >&2; exit 1; }
+warn() { echo "valheimctl: warning: $*" >&2; }
+info() { echo "== $*"; }
+
+# Mutating commands go through run() so --dry-run can print instead of execute.
+run() {
+  if ((DRY)); then printf '[dry-run]'; printf ' %q' "$@"; echo; else "$@"; fi
+}
+
+confirm() {
+  if ((YES || DRY)); then return 0; fi
+  local a; read -r -p "$1 [y/N] " a
+  [[ $a == y || $a == Y ]]
+}
+
+# put FILE MODE < content : write a file atomically with the given mode.
+put() {
+  local f=$1 mode=$2 tmp
+  if ((DRY)); then echo "[dry-run] would write $f (mode $mode):"; sed 's/^/    /'; return 0; fi
+  mkdir -p "$(dirname "$f")"
+  tmp=$(mktemp "$f.XXXXXX"); cat >"$tmp"; chmod "$mode" "$tmp"; mv "$tmp" "$f"
+}
+
+# ---------------------------------------------------------------- variables
+# Variables the image understands (see WS18 env catalog). Anything else in a config file is rejected.
+KNOWN_VARS=" TZ PUID PGID SERVER_NAME SERVER_PUBLIC SERVER_ARGS CROSSPLAY STEAMCMD_ARGS PUBLIC_TEST
+ UPDATE_IF_IDLE RESTART_CRON RESTART_IF_IDLE BACKUPS BACKUPS_CRON BACKUPS_DIRECTORY BACKUPS_MAX_AGE
+ BACKUPS_MAX_COUNT BACKUPS_IF_IDLE BACKUPS_IDLE_GRACE_PERIOD BACKUPS_ZIP SUPERVISOR_HTTP SUPERVISOR_HTTP_USER
+ STATUS_HTTP STATUS_HTTP_CONF STATUS_HTTP_HTDOCS BEPINEX VALHEIM_PLUS VALHEIM_PLUS_REPO VALHEIM_PLUS_RELEASE
+ PERMISSIONS_UMASK ADMINLIST_IDS BANNEDLIST_IDS PERMITTEDLIST_IDS SYSLOG_REMOTE_HOST SYSLOG_REMOTE_PORT
+ SYSLOG_REMOTE_AND_LOCAL IDLE_DATAGRAM_WINDOW IDLE_DATAGRAM_MAX_COUNT UPDATE_CRON "
+# Derived by the tool (or secrets): not allowed in config files.
+DERIVED_VARS=" WORLD_NAME SERVER_PORT STATUS_HTTP_PORT SUPERVISOR_HTTP_PORT SERVER_PASS SERVER_PASS_FILE SUPERVISOR_HTTP_PASS SUPERVISOR_HTTP_PASS_FILE WORLD_SEED "
+# Tool-internal keys (not passed to the container).
+INTERNAL_VARS=" IMAGE UPDATE_HOURS SUFFIX SEED "
+
+in_list()  { local nl=$'\n' l; l=" ${2//$nl/ } "; [[ $l == *" $1 "* ]]; }
+is_known() {
+  local k=$1
+  in_list "$k" "$KNOWN_VARS" && return 0
+  [[ $k =~ ^(BEPINEXCFG_|VPCFG_|VALHEIM_LOG_FILTER_|ON_VALHEIM_LOG_FILTER_) ]] && return 0
+  [[ $k =~ ^(PRE|POST)_[A-Z_]+_HOOK$ ]] && return 0
+  [[ $k =~ ^[A-Z_]+_(DIRECTORY|FILE)_PERMISSIONS$ ]] && return 0
+  return 1
+}
+is_derived()  { in_list "$1" "$DERIVED_VARS"; }
+is_internal() { in_list "$1" "$INTERNAL_VARS"; }
+check_key() {
+  local k=$1
+  [[ $k =~ ^[A-Z][A-Z0-9_]*$ ]] || die "bad variable name: $k"
+  if is_derived "$k"; then die "$k is derived/secret and cannot be set here (ports/world name come from the world number and SUFFIX; passwords use 'valheimctl passwd')"; fi
+  is_internal "$k" || is_known "$k" || die "unknown variable $k (not in the image's documented set; add it to KNOWN_VARS if it is real)"
+}
+
+# load_env ARRAYNAME FILE : parse KEY=value lines (no shell evaluation, no trailing comments).
+load_env() {
+  local -n _out=$1; local f=$2 line k v n=0
+  [[ -f $f ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    n=$((n + 1)); line=${line%$'\r'}
+    [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ $line =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]] || die "$f:$n: expected KEY=value"
+    k=${BASH_REMATCH[1]}; v=${BASH_REMATCH[2]}
+    if [[ $v =~ ^\"(.*)\"$ || $v =~ ^\'(.*)\'$ ]]; then v=${BASH_REMATCH[1]}; fi
+    _out[$k]=$v
+  done <"$f"
+}
+
+# ---------------------------------------------------------------- planning
+# parse_nn NN -> sets N, NN, C (container), HOMEDIR
+parse_nn() {
+  [[ ${1:-} =~ ^[0-9]{1,2}$ ]] || die "world number must be 1-99, got '${1:-}'"
+  N=$((10#$1)); ((N >= 1)) || die "world number must be 1-99"
+  NN=$(printf '%02d' "$N"); C="valheim$NN"; HOMEDIR="$DATA/$C"
+}
+
+secret_file() { # server|supervisor -> path of the password file to use
+  local f
+  for f in "$ETC/secrets/$NN.$1.pass" "$ETC/secrets/default.$1.pass"; do
+    if [[ -f $f ]]; then echo "$f"; return; fi
+  done
+  die "no $1 password file for world $NN (looked for $ETC/secrets/$NN.$1.pass and default.$1.pass); run: valheimctl passwd $NN $1"
+}
+
+# plan NN : load fleet.env + worlds/NN.env and derive everything for one world.
+plan() {
+  parse_nn "$1"
+  declare -gA CFG=()
+  load_env CFG "$ETC/fleet.env"
+  [[ -f $ETC/worlds/$NN.env ]] || die "no $ETC/worlds/$NN.env (use 'valheimctl new $NN <suffix>' or 'valheimctl adopt $NN')"
+  load_env CFG "$ETC/worlds/$NN.env"
+  local k
+  for k in "${!CFG[@]}"; do check_key "$k"; done
+
+  SUFFIX=${CFG[SUFFIX]:-}
+  [[ $SUFFIX =~ ^[A-Za-z0-9_-]+$ ]] || die "world $NN: SUFFIX missing or has characters other than A-Z a-z 0-9 _ -"
+  WORLD="$C-$SUFFIX"
+  IMAGE=${CFG[IMAGE]:-$DEFAULT_IMAGE}
+  GAME_PORT=$((2456 + (N - 1) * 10))
+  if ((N <= 9)); then STATUS_PORT=$((90 + N)); else STATUS_PORT=$((8000 + N)); fi
+  SUP_PORT=$((9000 + N))
+
+  # Stagger update checks: minute 5/20/35/50 for worlds 1-4, next group of four shifts one hour.
+  local hours=${CFG[UPDATE_HOURS]:-0,6,12,18} h out="" shift=$(((N - 1) / 4))
+  for h in ${hours//,/ }; do out+="$(((h + shift) % 24)),"; done
+  UPDATE_CRON_DERIVED="$((5 + 15 * ((N - 1) % 4))) ${out%,} * * *"
+
+  ENVS=()
+  local keys; keys=$(printf '%s\n' "${!CFG[@]}" | sort)
+  while IFS= read -r k; do
+    [[ -n $k ]] || continue
+    is_internal "$k" && continue
+    [[ $k == UPDATE_CRON ]] && continue
+    ENVS+=("$k=${CFG[$k]}")
+  done <<<"$keys"
+  [[ -n ${CFG[SERVER_NAME]:-} ]] || ENVS+=("SERVER_NAME=$WORLD")
+  ENVS+=("WORLD_NAME=$WORLD" "SERVER_PORT=2456" "UPDATE_CRON=${CFG[UPDATE_CRON]:-$UPDATE_CRON_DERIVED}")
+  [[ -z ${CFG[SEED]:-} ]] || ENVS+=("WORLD_SEED=${CFG[SEED]}")
+  [[ ${CFG[STATUS_HTTP]:-} != true ]] || ENVS+=("STATUS_HTTP_PORT=80")
+  if [[ ${CFG[SUPERVISOR_HTTP]:-} == true ]]; then
+    ENVS+=("SUPERVISOR_HTTP_PORT=9001" "SUPERVISOR_HTTP_PASS_FILE=/run/secrets/supervisor_pass")
+  fi
+  ENVS+=("SERVER_PASS_FILE=/run/secrets/server_pass")
+
+  PORTS=(-p "$GAME_PORT:2456/udp" -p "$((GAME_PORT + 1)):2457/udp" -p "$((GAME_PORT + 2)):2458/udp")
+  [[ ${CFG[STATUS_HTTP]:-} != true ]] || PORTS+=(-p "$STATUS_PORT:80/tcp")
+  [[ ${CFG[SUPERVISOR_HTTP]:-} != true ]] || PORTS+=(-p "$SUP_PORT:9001/tcp")
+  MOUNTS=(-v "$HOMEDIR/config:/config" -v "$HOMEDIR/data:/opt/valheim")
+  local sf; sf=$(secret_file server) || exit 1
+  MOUNTS+=(-v "$sf:/run/secrets/server_pass:ro")
+  if [[ ${CFG[SUPERVISOR_HTTP]:-} == true ]]; then
+    sf=$(secret_file supervisor) || exit 1
+    MOUNTS+=(-v "$sf:/run/secrets/supervisor_pass:ro")
+  fi
+}
+
+container_exists()  { "$DOCKER" inspect "$C" >/dev/null 2>&1; }
+container_running() { [[ $("$DOCKER" inspect -f '{{.State.Running}}' "$C" 2>/dev/null || true) == true ]]; }
+world_exists()      { [[ -d $HOMEDIR/config/worlds_local/$WORLD || -f $HOMEDIR/config/worlds_local/$WORLD.fwl ]]; }
+players() {
+  curl -fsS -m5 "http://127.0.0.1:$STATUS_PORT/status.json" 2>/dev/null | grep -o '"player_count": *[0-9]*' | grep -o '[0-9]*$' || true
+}
+
+current_env() { # running container's env, restricted to vars we manage; real passwords masked
+  local l k
+  "$DOCKER" inspect "$C" --format '{{range .Config.Env}}{{println .}}{{end}}' | while IFS= read -r l; do
+    k=${l%%=*}
+    if is_known "$k" || is_derived "$k" || [[ $k == UPDATE_CRON ]]; then
+      case $k in SERVER_PASS|SUPERVISOR_HTTP_PASS) l="$k=<masked>";; esac
+      echo "$l"
+    fi
+  done | sort
+}
+
+show_diff() { # returns 0 if there is a difference
+  local want; want=$(printf '%s\n' "${ENVS[@]}" | sort)
+  if ! container_exists; then info "container $C does not exist yet; will be created with:"; printf '    %s\n' "${ENVS[@]}"; return 0; fi
+  if diff -u <(current_env) <(printf '%s\n' "$want") | tail -n +3; then :; fi
+  ! diff -q <(current_env) <(printf '%s\n' "$want") >/dev/null
+}
+
+do_backup() {
+  world_exists || { info "no existing world to back up"; return 0; }
+  local ts f d="$HOMEDIR/config/worlds_local"; ts=$(date +%Y%m%d-%H%M%S); f="$BACKUPS/$WORLD-$ts.tgz"
+  run mkdir -p "$BACKUPS"
+  if [[ -d $d/$WORLD ]]; then run tar -C "$d" -czf "$f" "$WORLD"; else run tar -C "$d" -czf "$f" "$WORLD.fwl" "$WORLD.db"; fi
+  info "backup: $f"
+  if ((!DRY)); then
+    # shellcheck disable=SC2012
+    ls -1t "$BACKUPS/$WORLD-"*.tgz 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)) | xargs -r rm -f --
+  fi
+}
+
+wait_ready() {
+  if ((DRY)); then return 0; fi
+  local t=0
+  while ((t < WAIT_SECS)); do
+    if "$DOCKER" logs "$C" 2>&1 | grep -q 'Game server connected'; then info "$C is up (world $WORLD)"; return 0; fi
+    sleep 3; t=$((t + 3))
+  done
+  warn "$C not ready after ${WAIT_SECS}s (it may still be updating): valheimctl logs $NN"; return 1
+}
+
+# ---------------------------------------------------------------- commands
+cmd_apply() { # NN : the guarded recreate
+  plan "$1"
+  if ! world_exists && ((!NEWWORLD)); then
+    die "world '$WORLD' does not exist under $HOMEDIR/config/worlds_local. Applying would CREATE A NEW EMPTY WORLD. If that is intended, pass --new-world."
+  fi
+  if container_exists && container_running && ((!FORCE)); then
+    local p; p=$(players)
+    [[ -n $p ]] || die "cannot read player count from status page (port $STATUS_PORT); pass --force if you are sure nobody is playing"
+    ((p == 0)) || die "$p player(s) connected to $C; try later or pass --force"
+  fi
+  info "$C world=$WORLD game=udp/$GAME_PORT-$((GAME_PORT + 2)) status=tcp/$STATUS_PORT supervisor=tcp/$SUP_PORT image=$IMAGE"
+  if ! show_diff && ((!FORCE)) && container_running; then info "no changes for $C; nothing to do"; return 0; fi
+  confirm "Recreate $C now?" || die "aborted"
+  do_backup
+  if ((PULL)); then run "$DOCKER" pull "$IMAGE"; fi
+  if container_exists; then run "$DOCKER" stop -t 60 "$C"; run "$DOCKER" rm "$C"; fi
+  local eargs=() e; for e in "${ENVS[@]}"; do eargs+=(-e "$e"); done
+  run "$DOCKER" run -d --name "$C" --restart unless-stopped --cap-add SYS_NICE \
+    --log-opt max-size=10m --log-opt max-file=3 "${PORTS[@]}" "${MOUNTS[@]}" "${eargs[@]}" "$IMAGE"
+  wait_ready
+}
+
+each_world() { # CMD : run a command for every configured world, in order, stopping on failure
+  local f n
+  for f in "$ETC"/worlds/[0-9][0-9].env; do
+    [[ -e $f ]] || continue
+    n=$(basename "$f" .env); "$@" "$n"
+  done
+}
+
+cmd_set() {
+  local nn=${1:-}; shift || true; [[ $# -gt 0 ]] || die "usage: valheimctl set NN KEY=value [KEY=value ...]   (KEY= removes the override)"
+  parse_nn "$nn"; local f="$ETC/worlds/$NN.env"; [[ -f $f ]] || die "no $f"
+  local -A cur=(); load_env cur "$f"; local kv k v
+  for kv in "$@"; do
+    [[ $kv == *=* ]] || die "expected KEY=value, got '$kv'"
+    k=${kv%%=*}; v=${kv#*=}; check_key "$k"
+    if [[ $k == SUFFIX && ${cur[SUFFIX]:-} != "$v" ]] && ((!NEWWORLD)); then
+      die "changing SUFFIX renames the world, which creates a NEW empty world. Pass --new-world if you really want that."
+    fi
+    if [[ -z $v ]]; then unset "cur[$k]"; else cur[$k]=$v; fi
+  done
+  local new; new=$(printf '%s\n' "# managed by valheimctl; edit with 'valheimctl set'" ; for k in $(printf '%s\n' "${!cur[@]}" | sort); do printf '%s=%s\n' "$k" "${cur[$k]}"; done)
+  diff -u "$f" <(printf '%s\n' "$new") | tail -n +3 || true
+  printf '%s\n' "$new" | put "$f" 0644
+  if ((DRY)); then info "dry-run: not applying"; elif ((!NOAPPLY)); then cmd_apply "$NN"; else info "saved; run 'valheimctl apply $NN' to take effect"; fi
+}
+
+cmd_new() {
+  local nn=${1:-} suffix=${2:-} seed=${3:-}; [[ -n $suffix ]] || die "usage: valheimctl new NN SUFFIX [SEED]"
+  parse_nn "$nn"
+  [[ $suffix =~ ^[A-Za-z0-9_-]+$ ]] || die "SUFFIX may only contain A-Z a-z 0-9 _ -"
+  [[ ! -e $ETC/worlds/$NN.env && ! -d $HOMEDIR ]] || die "world $NN already exists ($ETC/worlds/$NN.env or $HOMEDIR); use 'set' or 'adopt'"
+  C="valheim$NN"; container_exists && die "a container named $C already exists; use 'adopt $NN'"
+  [[ -n $seed ]] || seed=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c10 || true)
+  printf '%s\n' "# managed by valheimctl; edit with 'valheimctl set'" "SUFFIX=$suffix" "SEED=$seed" | put "$ETC/worlds/$NN.env" 0644
+  run mkdir -p "$HOMEDIR/config" "$HOMEDIR/data"
+  if ((DRY)); then info "dry-run: stopping before password setup and apply (nothing was written)"; return 0; fi
+  if [[ ! -f $ETC/secrets/$NN.server.pass && ! -f $ETC/secrets/default.server.pass ]]; then cmd_passwd "$NN" server; fi
+  local -A fl=(); load_env fl "$ETC/fleet.env"
+  if [[ ${fl[SUPERVISOR_HTTP]:-} == true && ! -f $ETC/secrets/$NN.supervisor.pass && ! -f $ETC/secrets/default.supervisor.pass ]]; then
+    cmd_passwd "$NN" supervisor
+  fi
+  NEWWORLD=1; cmd_apply "$NN"
+  echo "Join: <host>:$((2456 + (N - 1) * 10)) (UDP), world $C-$suffix. Password is in $ETC/secrets/ (not printed)."
+}
+
+cmd_passwd() { # <NN|default> <server|supervisor>
+  local who=${1:-} kind=${2:-}; [[ $kind == server || $kind == supervisor ]] || die "usage: valheimctl passwd <NN|default> <server|supervisor>"
+  [[ $who == default ]] || { parse_nn "$who"; who=$NN; }
+  local p1 p2
+  if [[ -t 0 ]]; then
+    read -rs -p "New $kind password for $who: " p1; echo; read -rs -p "Again: " p2; echo
+    [[ $p1 == "$p2" ]] || die "passwords do not match"
+  else IFS= read -r p1; fi
+  [[ ${#p1} -ge 5 ]] || die "password must be at least 5 characters (game requirement)"
+  printf '%s' "$p1" | put "$ETC/secrets/$who.$kind.pass" 0600
+  info "wrote $ETC/secrets/$who.$kind.pass (applies on next 'apply')"
+}
+
+cmd_adopt() { # create NN.env + password files from a RUNNING container, without touching it
+  parse_nn "${1:-}"; [[ ! -f $ETC/worlds/$NN.env ]] || die "$ETC/worlds/$NN.env already exists"
+  container_exists || die "no container $C to adopt"
+  local -A fl=() env=(); load_env fl "$ETC/fleet.env"
+  local l; while IFS= read -r l; do [[ $l == *=* ]] && env[${l%%=*}]=${l#*=}; done < <("$DOCKER" inspect "$C" --format '{{range .Config.Env}}{{println .}}{{end}}')
+  local wn=${env[WORLD_NAME]:-}; [[ $wn == "$C-"* ]] || die "world name '$wn' does not start with '$C-'; cannot derive SUFFIX"
+  local out=("SUFFIX=${wn#"$C"-}") k
+  [[ -z ${env[WORLD_SEED]:-} ]] || out+=("SEED=${env[WORLD_SEED]}")
+  for k in $(printf '%s\n' "${!env[@]}" | sort); do
+    is_known "$k" || continue; [[ $k == UPDATE_CRON ]] && continue
+    [[ ${env[$k]} == "${fl[$k]:-}" ]] || { [[ $k == SERVER_NAME && ${env[$k]} == "$wn" ]] || out+=("$k=${env[$k]}"); }
+  done
+  printf '%s\n' "# adopted from running container $C" "${out[@]}" | put "$ETC/worlds/$NN.env" 0644
+  [[ -z ${env[SERVER_PASS]:-} || -f $ETC/secrets/$NN.server.pass ]] || printf '%s' "${env[SERVER_PASS]}" | put "$ETC/secrets/$NN.server.pass" 0600
+  [[ -z ${env[SUPERVISOR_HTTP_PASS]:-} || -f $ETC/secrets/$NN.supervisor.pass ]] || printf '%s' "${env[SUPERVISOR_HTTP_PASS]}" | put "$ETC/secrets/$NN.supervisor.pass" 0600
+  info "adopted $C; review $ETC/worlds/$NN.env, then 'valheimctl apply $NN' (a recreate; shows a diff first)"
+}
+
+cmd_list() {
+  printf '%-3s %-26s %-11s %-9s %-7s %s\n' NN WORLD GAME-UDP STATE PLAYERS MEM
+  local mem; mem=$("$DOCKER" stats --no-stream --format '{{.Name}} {{.MemUsage}}' 2>/dev/null || true)
+  local f n st p m
+  for f in "$ETC"/worlds/[0-9][0-9].env; do
+    [[ -e $f ]] || continue; n=$(basename "$f" .env)
+    ( plan "$n" 2>/dev/null || { WORLD="(config error)"; GAME_PORT="?"; C="valheim$n"; STATUS_PORT=0; }
+      st=$("$DOCKER" inspect -f '{{.State.Status}}' "$C" 2>/dev/null || echo none)
+      p=$([[ $st == running ]] && players || true)
+      m=$(awk -v c="$C" '$1==c{print $2}' <<<"$mem")
+      printf '%-3s %-26s %-11s %-9s %-7s %s\n' "$n" "$WORLD" "$GAME_PORT" "$st" "${p:--}" "${m:--}" )
+  done
+}
+
+cmd_status() {
+  plan "${1:-}"
+  echo "world:     $WORLD     image: $IMAGE"
+  echo "ports:     udp $GAME_PORT-$((GAME_PORT + 2))  status tcp $STATUS_PORT  supervisor tcp $SUP_PORT"
+  echo "update:    ${CFG[UPDATE_CRON]:-$UPDATE_CRON_DERIVED} (UTC unless TZ set)"
+  echo "state:     $("$DOCKER" inspect -f '{{.State.Status}} since {{.State.StartedAt}}' "$C" 2>/dev/null || echo 'no container')"
+  echo "players:   $(players)"
+  echo "last backup: $(ls -1t "$BACKUPS/$WORLD-"*.tgz 2>/dev/null | head -1 || true)"
+  echo "-- config drift:"; if container_exists; then show_diff || true; else echo "(no container)"; fi
+}
+
+cmd_check() {
+  local rc=0 f n d
+  info "worlds dirs vs configs"
+  for d in "$DATA"/valheim[0-9][0-9]; do
+    [[ -d $d ]] || continue; n=${d##*valheim}
+    [[ -f $ETC/worlds/$n.env ]] || { warn "$d has no $ETC/worlds/$n.env (unmanaged; try: valheimctl adopt $n)"; rc=1; }
+  done
+  local -A seen=()
+  for f in "$ETC"/worlds/[0-9][0-9].env; do
+    [[ -e $f ]] || continue; n=$(basename "$f" .env)
+    ( plan "$n" >/dev/null ) || { rc=1; continue; }
+    plan "$n"
+    [[ -d $HOMEDIR ]] || warn "$n: no data dir $HOMEDIR yet"
+    local pk; for pk in "$GAME_PORT" "$STATUS_PORT" "$SUP_PORT"; do
+      [[ -z ${seen[$pk]:-} ]] || { warn "port $pk used by worlds ${seen[$pk]} and $n"; rc=1; }; seen[$pk]=$n
+    done
+    # the 'wrong suffix = new empty world' trap: extra real worlds next to the configured one
+    local w; for w in "$HOMEDIR"/config/worlds_local/*; do
+      [[ -e $w ]] || continue; w=$(basename "$w"); w=${w%.fwl}; w=${w%.db}
+      [[ $w == "$WORLD" || $w == *_backup_auto-* ]] || { warn "$n: extra world '$w' in worlds_local (configured: $WORLD)"; rc=1; }
+    done
+    if container_exists; then
+      local cw; cw=$("$DOCKER" inspect "$C" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^WORLD_NAME=//p')
+      [[ $cw == "$WORLD" ]] || { warn "$n: running world '$cw' differs from config '$WORLD' (run apply)"; rc=1; }
+    else warn "$n: no container $C"; fi
+  done
+  info "memory"; free -m 2>/dev/null | sed -n '1,3p' || true
+  ((rc == 0)) && info "check: OK" || warn "check: problems found"
+  return $rc
+}
+
+cmd_backup()  { plan "${1:-}"; do_backup; }
+cmd_restart() { plan "${1:-}"; run "$DOCKER" exec "$C" supervisorctl restart valheim-server; }
+cmd_logs()    { plan "${1:-}"; shift || true; "$DOCKER" logs "$@" "$C"; }
+cmd_rm() {
+  plan "${1:-}"; container_exists || die "no container $C"
+  confirm "Stop and remove container $C? (world data in $HOMEDIR is NOT touched)" || die "aborted"
+  run "$DOCKER" stop -t 60 "$C"; run "$DOCKER" rm "$C"
+}
+cmd_pull() {
+  local -A fl=(); load_env fl "$ETC/fleet.env"; local img=${fl[IMAGE]:-$DEFAULT_IMAGE}
+  local before; before=$("$DOCKER" image inspect -f '{{.Id}}' "$img" 2>/dev/null || echo none)
+  run "$DOCKER" pull "$img"
+  info "image before: $before"; info "image after:  $("$DOCKER" image inspect -f '{{.Id}}' "$img" 2>/dev/null || echo '?')"
+  echo "Existing containers keep the old image until you run: valheimctl apply --all --force"
+}
+
+cmd_init() {
+  run mkdir -p "$ETC/worlds" "$ETC/secrets" "$BACKUPS"; run chmod 0700 "$ETC/secrets"
+  if [[ ! -f $ETC/fleet.env ]]; then
+    put "$ETC/fleet.env" 0644 <<EOF
+# Fleet-wide defaults (NO secrets here). Per-world overrides go in worlds/NN.env.
+IMAGE=$DEFAULT_IMAGE
+UPDATE_HOURS=0,6,12,18
+BACKUPS_MAX_COUNT=100
+STATUS_HTTP=true
+SUPERVISOR_HTTP=true
+SUPERVISOR_HTTP_USER=admin
+SERVER_PUBLIC=true
+BEPINEX=true
+#ADMINLIST_IDS=7656119xxxxxxxxxx 7656119yyyyyyyyyy
+EOF
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+valheimctl [flags] COMMAND ...
+  list | status NN | check | logs NN [-f] | backup NN | restart NN | rm NN | pull
+  init                          create /etc/valheim layout + fleet.env template
+  adopt NN                      write config for an already-running container (no change to it)
+  new NN SUFFIX [SEED]          stand up a new world
+  set NN KEY=val ...            change per-world config, then apply (KEY= removes an override)
+  apply NN | apply --all        guarded recreate from config
+  passwd <NN|default> <server|supervisor>
+flags: -n/--dry-run  -y/--yes  --force  --new-world  --pull  --no-apply
+EOF
+}
+
+main() {
+  local pos=() a
+  for a in "$@"; do
+    case $a in
+      -n|--dry-run) DRY=1;; -y|--yes) YES=1;; --force) FORCE=1;; --new-world) NEWWORLD=1;;
+      --pull) PULL=1;; --no-apply) NOAPPLY=1;; --all) ALL=1;; -h|--help) usage; exit 0;;
+      *) pos+=("$a");;
+    esac
+  done
+  local cmd=${pos[0]:-}; [[ -n $cmd ]] || { usage; exit 1; }
+  set -- "${pos[@]:1}"
+  case $cmd in
+    apply) if ((ALL)); then each_world cmd_apply; else cmd_apply "${1:-}"; fi;;
+    list) cmd_list;; status) cmd_status "$@";; check) cmd_check;; logs) cmd_logs "$@";;
+    backup) cmd_backup "$@";; restart) cmd_restart "$@";; rm) cmd_rm "$@";; pull) cmd_pull;;
+    init) cmd_init;; adopt) cmd_adopt "$@";; new) cmd_new "$@";; set) cmd_set "$@";; passwd) cmd_passwd "$@";;
+    *) usage; exit 1;;
+  esac
+}
+main "$@"
