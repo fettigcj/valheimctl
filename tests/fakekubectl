@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Minimal kubectl stub for tests: records calls, keeps deployment/secret state under $FAKE_K.
+K=${FAKE_K:?}; mkdir -p "$K"; echo "kubectl $*" >>"$K/calls.log"
+args=(); while [[ $# -gt 0 ]]; do case $1 in --context|-n) shift 2;; *) args+=("$1"); shift;; esac; done
+set -- "${args[@]}"; verb=$1; shift
+jp=; for a in "$@"; do [[ $a == jsonpath=* || $a == -o=jsonpath* ]] && jp=$a; done
+prev=; for a in "$@"; do [[ $prev == -o && $a == jsonpath=* ]] && jp=$a; prev=$a; done
+rv() { cat "$K/rv" 2>/dev/null || echo 1; }
+repl() { grep -m1 '^  replicas:' "$K/manifest.txt" 2>/dev/null | awk '{print $2}'; }
+case $verb in
+  create)
+    case $1 in
+      namespace) echo "kind: Namespace";;
+      secret) for a in "$@"; do [[ $a == --from-file=* ]] && { kv=${a#--from-file=}; cp "${kv#*=}" "$K/pending.${kv%%=*}"; }; done; echo "kind: Secret";;
+    esac;;
+  apply)
+    in=$(cat)
+    if grep -q '^kind: Secret' <<<"$in" || [[ $in == "kind: Secret" ]]; then
+      changed=0; for p in "$K"/pending.*; do [[ -e $p ]] || continue; n=${p##*/pending.}
+        cmp -s "$p" "$K/secret.$n" 2>/dev/null || changed=1; cp "$p" "$K/secret.$n"; rm -f "$p"; done
+      ((changed)) && echo $(( $(rv) + 1 )) >"$K/rv" || { [[ -e $K/rv ]] || echo 1 >"$K/rv"; }
+    elif grep -q '^kind: Deployment' <<<"$in"; then printf '%s\n' "$in" >"$K/manifest.txt"; touch "$K/deployed"
+    elif grep -q '^kind: Pod' <<<"$in"; then echo "pod-applied" >>"$K/calls.log"; fi;;
+  diff) in=$(cat); if [[ "$in" == "$(cat "$K/manifest.txt" 2>/dev/null)" ]]; then exit 0; else echo "+changed"; exit 1; fi;;
+  get)
+    case $1 in
+      pvc) cat "$K/world" 2>/dev/null;;
+      deployment) [[ -e $K/deployed ]] || exit 1
+        case $jp in
+          *readyReplicas*spec.replicas*) echo "$(repl)/$(repl)";; *readyReplicas*) [[ $(repl) -gt 0 ]] && echo "$(repl)";;
+          *annotations*) cat "$K/world" 2>/dev/null;; *spec.replicas*) repl;;
+          *WORLD_NAME*) grep -A1 'name: WORLD_NAME' "$K/manifest.txt" | sed -n 's/.*value: "\(.*\)"/\1/p';;
+        esac;;
+      pod) [[ -e $K/deployed && $(repl) -gt 0 ]] && echo "valheim-pod-0";;
+      secret) [[ -e $K/secret.server_pass ]] || exit 1
+        case $jp in *server_pass*) base64 -w0 <"$K/secret.server_pass";; *supervisor_pass*) base64 -w0 <"$K/secret.supervisor_pass" 2>/dev/null;; *resourceVersion*) rv;; esac;;
+      --raw) echo "{\"player_count\": ${FAKE_PLAYERS:-0}}";;
+    esac;;
+  exec)
+    if [[ " $* " == *" test "* || " $* " == *"test -d"* ]]; then [[ ${FAKE_WORLD_IN_POD:-1} == 1 ]]; exit; fi
+    if [[ " $* " == *" tar "* && " $* " == *" -czf - "* ]]; then echo "faketar"; exit 0; fi
+    if [[ " $* " == *"-i"* ]]; then cat >"$K/imported.tgz"; echo "imported" >>"$K/calls.log"; fi;;
+  annotate) for a in "$@"; do [[ $a == valheimctl.io/world=* ]] && echo "${a#*=}" >"$K/world"; done;;
+  logs) echo "Game server connected";;
+  delete) if [[ " $* " == *"deployment"* ]]; then rm -f "$K/deployed" "$K/manifest.txt"; fi;;
+  label|wait|top) :;;
+  *) echo "fakekubectl: unsupported $verb" >&2; exit 2;;
+esac

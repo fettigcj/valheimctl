@@ -8,6 +8,7 @@ case $cmd in
     while [[ $# -gt 0 ]]; do case $1 in -f|--format) fmt=$2; shift 2;; *) name=$1; shift;; esac; done
     [[ -f $S/$name.env ]] || exit 1
     case $fmt in
+      *Config.Labels*) echo "valheimctl.secrets=$(cat "$S/$name.label" 2>/dev/null)";;
       *Config.Env*) cat "$S/$name.env";;
       *State.Running*) echo true;; *State.Status*StartedAt*) echo "running since now";; *State.Status*) echo running;;
       *) echo '{}';;
@@ -15,9 +16,10 @@ case $cmd in
   run)
     name=; : >"$S/.tmp"
     while [[ $# -gt 0 ]]; do case $1 in --name) name=$2; shift 2;; -e) echo "$2" >>"$S/.tmp"; shift 2;;
+      --label) echo "${2#valheimctl.secrets=}" >"$S/$name.label"; shift 2;;
       -p|-v|--restart|--cap-add|--log-opt) echo "$1 $2" >>"$S/$name.args" 2>/dev/null; shift 2;; -d) shift;; *) shift;; esac; done
     mv "$S/.tmp" "$S/$name.env"; echo fakeid;;
-  stop) :;; rm) rm -f "$S/$1.env";;
+  stop) :;; rm) rm -f "$S/$1.env" "$S/$1.label";;
   logs) echo "01:00:00: Game server connected";;
   exec) echo "exec $*" >>"$S/exec.log";;
   stats) for f in "$S"/*.env; do [[ -e $f ]] && echo "$(basename "$f" .env) 1.2GiB / 16GiB"; done;;

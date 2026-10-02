@@ -1,48 +1,71 @@
 # valheimctl
 
-Small bash tool to run a handful of [lloesche/valheim-server](https://github.com/community-valheim-tools/valheim-server-docker)
-Docker worlds on one host. It replaces a hand-edited "destroy and recreate" script with config files plus guarded commands.
-Requires bash >= 4.3, docker, curl.
+One small bash tool to run **several [lloesche/valheim-server](https://github.com/community-valheim-tools/valheim-server-docker)
+worlds** side by side, on **Docker**, **Podman** or **Kubernetes (K3s)**, from the same config files.
 
-**Status: draft. Tested only against a stub `docker` (`bash tests/smoke.sh`), not yet on a real host.** Use `--dry-run` first.
+The image maintainer owns everything that goes *into* a game server. valheimctl manages the *fleet*:
+which worlds exist, their ports, per-world settings (one world vanilla, another with raids off), passwords,
+backups, and safe re-deploys. It does not modify the image; the same OCI image is used unchanged on every backend.
 
-## Layout
+> **Status: draft.** Verified only against stub `docker`/`kubectl` programs (`bash tests/smoke.sh`) and by parsing
+> the generated Kubernetes YAML. It has **not yet been run against a live Docker/Podman host or a live cluster**. Treat the
+> first run as a trial, use `--dry-run`, and please report what you find.
+
+## Install
+```bash
+git clone https://github.com/fettigcj/valheimctl
+sudo install -m 0755 valheimctl/valheimctl /usr/local/sbin/valheimctl
 ```
-/etc/valheim/fleet.env             fleet defaults (no secrets)         see examples/fleet.env.example
-/etc/valheim/worlds/NN.env         per-world overrides (no secrets)    see examples/world.env.example
-/etc/valheim/secrets/NN.server.pass, NN.supervisor.pass, default.*.pass   mode 0600
-/home/valheimServers/valheimNN/{config,data}    world data (bind mounts, never touched by rm/apply)
-/home/valheimServers/_backups/     tarball of the world before every recreate (last 10 kept)
+Needs bash >= 4.4 and, depending on the backend, `docker`, `podman` or `kubectl`. Also `curl` (Docker/Podman player check), `tar`, `diff`.
+
+## How it works
 ```
-Override locations with `VALHEIMCTL_ETC`, `VALHEIMCTL_DATA`, `VALHEIMCTL_DOCKER`.
+<config dir>/fleet.env          settings shared by every world (backend, image, admins, update hours ...)
+<config dir>/worlds/NN.env      per-world settings: SUFFIX, SEED, SERVER_ARGS, overrides
+<config dir>/secrets/*.pass     passwords, one file each, mode 0600 (never in env files, never in the container env)
+```
+`<config dir>` is `/etc/valheim` (as root) or `~/.config/valheimctl` (as a normal user); override with `VALHEIMCTL_ETC`.
+Everything else is **derived from the world number NN**, so you never type a port:
 
-Config files are `KEY=value` lines (no comments after a value, no shell evaluation). Only variables the image
-documents are accepted. Per-world values override fleet values, so one world can run vanilla and another with
-`SERVER_ARGS=-modifier raids none`.
+| What | Rule | World 1 / 2 / 4 |
+|---|---|---|
+| Container / deployment | `valheimNN` | valheim01 ... |
+| World + server name | `valheimNN-<SUFFIX>` | valheim04-KidWorld |
+| Game port (UDP; +1 query, +2 extra) | `PORT_BASE + (NN-1)*10`, base 2456 | 2456 / 2466 / 2486 |
+| Status page / supervisor UI (TCP) | `90+NN` (NN<=9, else `8000+NN`) / `9000+NN` | 91 / 92 / 94 and 9001 / 9002 / 9004 |
+| Update-check time (UTC) | minute `5+15*((NN-1)%4)`, hours from `UPDATE_HOURS`, +1h per group of 4 | 00:05 / 00:20 / 00:50 ... |
 
-## What is derived from the world number N (never typed)
-container `valheimNN`; world/server name `valheimNN-SUFFIX`; game UDP `2456+(N-1)*10` (+1 query, +2 extra);
-status page TCP `90+N` (N<=9, else `8000+N`); supervisor TCP `9000+N`; update minute `5+15*((N-1)%4)` with the
-hour list shifted by `(N-1)/4`. Passwords come from per-world files, falling back to `default.*.pass`, and reach the
-container through the image's `*_PASS_FILE` variables (read-only mounts), so they never appear in `docker inspect`.
-(The game itself still receives the password as a `-password` argument, visible in `ps`.)
+Every command accepts `-n/--dry-run` to print what it would do. Commands: `list status check logs backup restart rm pull
+init adopt import new set apply passwd` (`valheimctl --help`). Reference: [docs/commands.md](docs/commands.md).
 
-## Commands
-`list`, `status NN`, `check`, `logs NN [-f]`, `backup NN`, `restart NN` (game process only), `rm NN` (container only),
-`pull`, `init`, `adopt NN`, `new NN SUFFIX [SEED]`, `set NN KEY=val...`, `apply NN | --all`, `passwd <NN|default> <server|supervisor>`.
-Flags: `-n/--dry-run`, `-y/--yes`, `--force`, `--new-world`, `--pull`, `--no-apply`.
+## Pick your environment
+| Backend | Select with | Guide |
+|---|---|---|
+| Docker | default, or `BACKEND=docker` in `fleet.env` | [docs/docker.md](docs/docker.md) |
+| Podman | `BACKEND=podman` | [docs/podman.md](docs/podman.md) |
+| Kubernetes / K3s | `BACKEND=k8s` | [docs/kubernetes.md](docs/kubernetes.md) |
 
-## `apply` safety sequence
-1. refuses if the configured world does not already exist (the "wrong SUFFIX creates an empty world" trap) unless `--new-world`;
-2. refuses if players are connected (status page) or the count cannot be read, unless `--force`;
-3. shows an env diff against the running container (real passwords masked) and exits if nothing changed;
-4. asks for confirmation, backs up the world, optionally pulls, then stop/rm/run, and waits for "Game server connected".
-Nothing before step 4 changes the running container.
+Moving worlds between backends, or running a Docker copy and a Kubernetes copy side by side: [docs/migration.md](docs/migration.md).
+All settings and which are per-world vs fleet-wide: [docs/configuration.md](docs/configuration.md).
 
-## Adopting an existing fleet
-`valheimctl init`, put shared values (e.g. `ADMINLIST_IDS`) in `fleet.env`, then `valheimctl adopt NN` for each running
-container (writes `worlds/NN.env` and password files from its current env, without touching it), review, and `valheimctl apply NN`.
+## Safety rules built in
+`apply` (and `set`, which calls it) will not:
+1. start a world whose name does not already exist on the volume, which is the "mistyped suffix silently makes an empty world" trap
+   (`--new-world` overrides; `import` is the way to bring an existing world in);
+2. restart a world while players are connected, or if it cannot tell (`--force` overrides);
+3. do anything if nothing changed. It shows a diff first, asks, then **backs the world up before touching it**.
 
-## Which changes need a recreate
-Any environment variable, port, image or password change needs `apply` (a few seconds of downtime, data untouched).
-Editing adminlist/bannedlist/permittedlist files under `config/` or BepInEx plugin files only needs `restart NN` at most.
+`rm` removes the container/deployment only and **never deletes world data**.
+
+## Quick start (Docker)
+```bash
+sudo valheimctl init                        # creates /etc/valheim and a fleet.env template
+sudoedit /etc/valheim/fleet.env             # set ADMINLIST_IDS etc.
+sudo valheimctl new 1 FamilyWorld           # asks for a password, creates and starts valheim01
+sudo valheimctl set 1 SERVER_ARGS='-modifier raids none'    # per-world game args
+valheimctl list
+```
+
+## Development
+`bash tests/smoke.sh` runs the whole tool against stub `docker`/`kubectl` programs (no real engine needed). Contributions that exercise a
+real Docker, Podman or cluster and report differences are the most useful thing right now. No license has been chosen yet.
