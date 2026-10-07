@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Chris Fettig
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Smoke test of valheimctl against a stub docker. Run: bash tests/smoke.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT

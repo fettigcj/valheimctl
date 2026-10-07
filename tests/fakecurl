@@ -1,2 +1,4 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Chris Fettig
+# SPDX-License-Identifier: GPL-3.0-or-later
 echo "{\"player_count\": ${FAKE_PLAYERS:-0}}"

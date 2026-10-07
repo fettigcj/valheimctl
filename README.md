@@ -68,4 +68,15 @@ valheimctl list
 
 ## Development
 `bash tests/smoke.sh` runs the whole tool against stub `docker`/`kubectl` programs (no real engine needed). Contributions that exercise a
-real Docker, Podman or cluster and report differences are the most useful thing right now. No license has been chosen yet.
+real Docker, Podman or cluster and report differences are the most useful thing right now.
+
+## License
+Copyright (C) 2026 Chris Fettig. valheimctl is free software under the **GNU General Public License, version 3 or (at your option)
+any later version** (`GPL-3.0-or-later`); see [LICENSE](LICENSE).
+
+valheimctl runs `docker`, `podman` and `kubectl` as separate programs and does not include or link the container image it manages, so
+those programs and that image keep their own licenses. Your own configuration files, world data and containers are yours and are not
+covered by this license. The Kubernetes manifests the tool generates from your configuration are output of the tool, not part of
+valheimctl, and are intended to be yours to use however you like.
+
+Contributions are welcome under the same license. Please sign off your commits (`git commit -s`, the Developer Certificate of Origin).

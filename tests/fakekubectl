@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Chris Fettig
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Minimal kubectl stub for tests: records calls, keeps deployment/secret state under $FAKE_K.
 K=${FAKE_K:?}; mkdir -p "$K"; echo "kubectl $*" >>"$K/calls.log"
 args=(); while [[ $# -gt 0 ]]; do case $1 in --context|-n) shift 2;; *) args+=("$1"); shift;; esac; done
