@@ -13,21 +13,30 @@
 # Config lives in files (see README.md), never in this script. Needs bash >= 4.4.
 set -euo pipefail
 
+# ---------------------------------------------------------------- locations
+# Precedence: explicit VALHEIMCTL_ETC / VALHEIMCTL_DATA, else VALHEIMCTL_HOME/{config,worlds}, else system defaults.
+INST_HOME="${VALHEIMCTL_HOME:-}"
 if [[ -n ${VALHEIMCTL_ETC:-} ]]; then ETC=$VALHEIMCTL_ETC
+elif [[ -n $INST_HOME ]]; then ETC="$INST_HOME/config"
 elif [[ -d /etc/valheim || ${EUID:-$(id -u)} -eq 0 ]]; then ETC=/etc/valheim
 else ETC="${XDG_CONFIG_HOME:-$HOME/.config}/valheimctl"; fi
-DATA="${VALHEIMCTL_DATA:-/home/valheimServers}"      # docker/podman: where worlds live on the host
+if [[ -n ${VALHEIMCTL_DATA:-} ]]; then DATA=$VALHEIMCTL_DATA
+elif [[ -n $INST_HOME ]]; then DATA="$INST_HOME/worlds"
+else DATA=/home/valheimServers; fi
 BACKUP_KEEP="${VALHEIMCTL_BACKUP_KEEP:-10}"
 WAIT_SECS="${VALHEIMCTL_WAIT:-300}"
 DEFAULT_IMAGE="lloesche/valheim-server:latest"
 KCTX="${VALHEIMCTL_KUBE_CONTEXT:-}"
+STATUS_FILE=/opt/valheim/htdocs/status.json     # written by the image's status updater; read from inside the container
 
-DRY=0 YES=0 FORCE=0 NEWWORLD=0 PULL=0 NOAPPLY=0 ALL=0
+DRY=0 YES=0 FORCE=0 NEWWORLD=0 PULL=0 NOAPPLY=0 ALL=0 JSON=0
 BACKEND=docker FAMILY=dk DOCKER=docker KUBECTL=kubectl BACKUPS=""
+declare -A CFG=()
 
 die()  { echo "valheimctl: $*" >&2; exit 1; }
 warn() { echo "valheimctl: warning: $*" >&2; }
 info() { echo "== $*"; }
+utc_stamp() { date -u +%Y%m%d-%H%M%S; }
 
 # Mutating commands go through run() so --dry-run can print instead of execute.
 run() {
@@ -48,18 +57,22 @@ put() {
   tmp=$(mktemp "$f.XXXXXX"); cat >"$tmp"; chmod "$mode" "$tmp"; mv "$tmp" "$f"
 }
 
+json_str() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\t'/\\t}; s=${s//$'\n'/\\n}; printf '"%s"' "$s"; }
+
 # ---------------------------------------------------------------- variables
-# Variables the image understands. Anything else in a config file is rejected.
+# Variables the image understands that a config file may set. Anything else is rejected.
 KNOWN_VARS=" TZ PUID PGID SERVER_NAME SERVER_PUBLIC SERVER_ARGS CROSSPLAY STEAMCMD_ARGS PUBLIC_TEST
  UPDATE_IF_IDLE RESTART_CRON RESTART_IF_IDLE BACKUPS BACKUPS_CRON BACKUPS_DIRECTORY BACKUPS_MAX_AGE
- BACKUPS_MAX_COUNT BACKUPS_IF_IDLE BACKUPS_IDLE_GRACE_PERIOD BACKUPS_ZIP SUPERVISOR_HTTP SUPERVISOR_HTTP_USER
- STATUS_HTTP STATUS_HTTP_CONF STATUS_HTTP_HTDOCS BEPINEX VALHEIM_PLUS VALHEIM_PLUS_REPO VALHEIM_PLUS_RELEASE
+ BACKUPS_MAX_COUNT BACKUPS_IF_IDLE BACKUPS_IDLE_GRACE_PERIOD BACKUPS_ZIP
+ STATUS_HTTP_CONF STATUS_HTTP_HTDOCS BEPINEX VALHEIM_PLUS VALHEIM_PLUS_REPO VALHEIM_PLUS_RELEASE
  PERMISSIONS_UMASK ADMINLIST_IDS BANNEDLIST_IDS PERMITTEDLIST_IDS SYSLOG_REMOTE_HOST SYSLOG_REMOTE_PORT
  SYSLOG_REMOTE_AND_LOCAL IDLE_DATAGRAM_WINDOW IDLE_DATAGRAM_MAX_COUNT UPDATE_CRON "
 # Derived by the tool (or secrets): not allowed in config files.
-DERIVED_VARS=" WORLD_NAME SERVER_PORT STATUS_HTTP_PORT SUPERVISOR_HTTP_PORT SERVER_PASS SERVER_PASS_FILE SUPERVISOR_HTTP_PASS SUPERVISOR_HTTP_PASS_FILE WORLD_SEED "
+DERIVED_VARS=" WORLD_NAME SERVER_PORT STATUS_HTTP STATUS_HTTP_PORT SUPERVISOR_HTTP SUPERVISOR_HTTP_USER SUPERVISOR_HTTP_PORT
+ SERVER_PASS SERVER_PASS_FILE SUPERVISOR_HTTP_PASS SUPERVISOR_HTTP_PASS_FILE WORLD_SEED "
 # Tool-internal keys (not passed to the container). K8S_* only matter to the k8s backend.
-INTERNAL_VARS=" IMAGE UPDATE_HOURS SUFFIX SEED BACKEND PORT_BASE K8S_NAMESPACE K8S_EXPOSE K8S_EXPOSE_WEB K8S_LB_IP
+INTERNAL_VARS=" IMAGE UPDATE_HOURS SUFFIX SEED BACKEND INSTANCE_ID PORT_BLOCK HONOR_ORIGINAL_PORTS PUBLISH_STATUS PUBLISH_CONTROL
+ PUBLIC_HOST DISPLAY_TZ LEGACY_CONTAINER K8S_NAMESPACE K8S_EXPOSE K8S_EXPOSE_WEB K8S_LB_IP
  K8S_NODE_SELECTOR K8S_STORAGE_CLASS K8S_CONFIG_SIZE K8S_DATA_SIZE K8S_MEM_REQUEST K8S_MEM_LIMIT
  K8S_CPU_REQUEST K8S_CPU_LIMIT K8S_PULL_POLICY "
 
@@ -77,7 +90,7 @@ is_internal() { in_list "$1" "$INTERNAL_VARS"; }
 check_key() {
   local k=$1
   [[ $k =~ ^[A-Z][A-Z0-9_]*$ ]] || die "bad variable name: $k"
-  if is_derived "$k"; then die "$k is derived/secret and cannot be set here (ports/world name come from the world number and SUFFIX; passwords use 'valheimctl passwd')"; fi
+  if is_derived "$k"; then die "$k is derived/secret and cannot be set here (ports and the world name come from the world number; passwords use 'valheimctl passwd'; status/supervisor pages use PUBLISH_STATUS / PUBLISH_CONTROL)"; fi
   is_internal "$k" || is_known "$k" || die "unknown variable $k (not in the image's documented set; add it to KNOWN_VARS if it is real)"
 }
 
@@ -111,9 +124,9 @@ be() { local op=$1; shift; "${FAMILY}_$op" "$@"; }   # dispatch to dk_<op> or k8
 
 # ---------------------------------------------------------------- planning (backend independent)
 parse_nn() {
-  [[ ${1:-} =~ ^[0-9]{1,2}$ ]] || die "world number must be 1-99, got '${1:-}'"
-  N=$((10#$1)); ((N >= 1)) || die "world number must be 1-99"
-  NN=$(printf '%02d' "$N"); C="valheim$NN"; HOMEDIR="$DATA/$C"
+  [[ ${1:-} =~ ^[0-9]{1,2}$ ]] || die "world number must be 1-9, got '${1:-}'"
+  N=$((10#$1)); ((N >= 1 && N <= 9)) || die "world number must be 1-9 (each instance holds nine worlds), got '$1'"
+  NN=$(printf '%02d' "$N"); HOMEDIR="$DATA/valheim$NN"
 }
 
 secret_file() { # server|supervisor -> path of the password file to use
@@ -134,18 +147,32 @@ plan() {
   local k
   for k in "${!CFG[@]}"; do check_key "$k"; done
 
+  INSTANCE=${CFG[INSTANCE_ID]:-main}
+  [[ $INSTANCE =~ ^[a-z0-9-]{1,16}$ ]] || die "INSTANCE_ID must be 1-16 characters of a-z 0-9 and hyphen"
+  C="valheim-$INSTANCE-$NN"                       # container / deployment name
   SUFFIX=${CFG[SUFFIX]:-}
   [[ $SUFFIX =~ ^[A-Za-z0-9_-]+$ ]] || die "world $NN: SUFFIX missing or has characters other than A-Z a-z 0-9 _ -"
-  WORLD="$C-$SUFFIX"
+  WORLD="valheim$NN-$SUFFIX"
   IMAGE=${CFG[IMAGE]:-$DEFAULT_IMAGE}
-  [[ ${CFG[PORT_BASE]:-2456} =~ ^[0-9]+$ ]] || die "PORT_BASE must be a number"
-  GAME_PORT=$((${CFG[PORT_BASE]:-2456} + (N - 1) * 10))
-  if ((N <= 9)); then STATUS_PORT=$((90 + N)); else STATUS_PORT=$((8000 + N)); fi
-  SUP_PORT=$((9000 + N))
+
+  # Ports: one block of 100 per instance (block 0 = 2000-2099); world N game port = block + 10*N, query = game + 1,
+  # optional status page = game + 5, optional supervisor page = game + 6. HONOR_ORIGINAL_PORTS=true uses 2456, 2466, ...
+  # with status = game - 5 and supervisor = game - 4 so that everything for a world stays inside one decade.
+  local honor=${CFG[HONOR_ORIGINAL_PORTS]:-false} block=${CFG[PORT_BLOCK]:-0}
+  [[ $honor == true || $honor == false ]] || die "HONOR_ORIGINAL_PORTS must be true or false"
+  [[ $block =~ ^[0-9]$ ]] || die "PORT_BLOCK must be a digit 0-9"
+  if [[ $honor == true ]]; then BLOCK_BASE=2446; STATUS_OFF=-5; CONTROL_OFF=-4
+  else BLOCK_BASE=$((2000 + 100 * block)); STATUS_OFF=5; CONTROL_OFF=6; fi
+  GAME_PORT=$((BLOCK_BASE + 10 * N)); QUERY_PORT=$((GAME_PORT + 1))
+  STATUS_PORT=$((GAME_PORT + STATUS_OFF)); CONTROL_PORT=$((GAME_PORT + CONTROL_OFF))
+  WEB_PORT=$BLOCK_BASE
+  PUB_STATUS=${CFG[PUBLISH_STATUS]:-false}; PUB_CONTROL=${CFG[PUBLISH_CONTROL]:-false}
+  [[ $PUB_STATUS == true || $PUB_STATUS == false ]] || die "PUBLISH_STATUS must be true or false"
+  [[ $PUB_CONTROL == true || $PUB_CONTROL == false ]] || die "PUBLISH_CONTROL must be true or false"
   NS=${CFG[K8S_NAMESPACE]:-valheim}
   REPLICAS=1
 
-  # Stagger update checks: minute 5/20/35/50 for worlds 1-4, next group of four shifts one hour.
+  # Stagger update checks: minute 5/20/35/50 for worlds 1-4, then 5/20/35/50 an hour later for worlds 5-8, and so on.
   local hours=${CFG[UPDATE_HOURS]:-0,6,12,18} h out="" shift=$(((N - 1) / 4))
   for h in ${hours//,/ }; do out+="$(((h + shift) % 24)),"; done
   UPDATE_CRON_DERIVED="$((5 + 15 * ((N - 1) % 4))) ${out%,} * * *"
@@ -159,14 +186,18 @@ plan() {
     ENVS+=("$k=${CFG[$k]}")
   done <<<"$keys"
   [[ -n ${CFG[SERVER_NAME]:-} ]] || ENVS+=("SERVER_NAME=$WORLD")
-  ENVS+=("WORLD_NAME=$WORLD" "SERVER_PORT=2456" "UPDATE_CRON=${CFG[UPDATE_CRON]:-$UPDATE_CRON_DERIVED}")
+  # The game advertises the port it was started with, so run it on its real external port (port-for-port publishing).
+  ENVS+=("WORLD_NAME=$WORLD" "SERVER_PORT=$GAME_PORT" "UPDATE_CRON=${CFG[UPDATE_CRON]:-$UPDATE_CRON_DERIVED}")
   [[ -z ${CFG[SEED]:-} ]] || ENVS+=("WORLD_SEED=${CFG[SEED]}")
-  [[ ${CFG[STATUS_HTTP]:-} != true ]] || ENVS+=("STATUS_HTTP_PORT=80")
+  # The in-container status server stays on: valheimctl reads its status.json from inside the container (no host port needed).
+  ENVS+=("STATUS_HTTP=true" "STATUS_HTTP_PORT=80")
   SF_SERVER=$(secret_file server) || exit 1
   SF_SUP=""
-  if [[ ${CFG[SUPERVISOR_HTTP]:-} == true ]]; then
-    ENVS+=("SUPERVISOR_HTTP_PORT=9001" "SUPERVISOR_HTTP_PASS_FILE=/run/secrets/supervisor_pass")
+  if [[ $PUB_CONTROL == true ]]; then
+    ENVS+=("SUPERVISOR_HTTP=true" "SUPERVISOR_HTTP_USER=admin" "SUPERVISOR_HTTP_PORT=9001" "SUPERVISOR_HTTP_PASS_FILE=/run/secrets/supervisor_pass")
     SF_SUP=$(secret_file supervisor) || exit 1
+  else
+    ENVS+=("SUPERVISOR_HTTP=false")
   fi
   ENVS+=("SERVER_PASS_FILE=/run/secrets/server_pass")
 }
@@ -175,7 +206,7 @@ plan() {
 prune_backups() {
   if ((DRY)); then return 0; fi
   # shellcheck disable=SC2012
-  ls -1t "$BACKUPS/$WORLD-"*.tgz 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)) | xargs -r rm -f --
+  ls -1t "$BACKUPS/$WORLD-"*.tgz 2>/dev/null | grep -v pre-restore | tail -n +$((BACKUP_KEEP + 1)) | xargs -r rm -f --
 }
 
 wait_for_log() { # CMD... : poll a command that prints logs until the server announces it is up
@@ -188,6 +219,9 @@ wait_for_log() { # CMD... : poll a command that prints logs until the server ann
   warn "$C not ready after ${WAIT_SECS}s (it may still be updating): valheimctl logs $NN"; return 1
 }
 
+# status_count : player count from the status.json text on stdin (the players list is never printed)
+status_count() { grep -o '"player_count": *[0-9]*' | grep -o '[0-9]*$' || true; }
+
 # import_check FILE : the archive must hold exactly this world (as made by `valheimctl backup`).
 import_check() {
   [[ -f $1 ]] || die "no such file: $1"
@@ -196,22 +230,60 @@ import_check() {
   [[ -z $bad ]] || die "archive does not contain only world '$WORLD' (found: $(echo "$bad" | tr '\n' ' ')). Make it with: tar -C <worlds_local> -czf x.tgz $WORLD"
 }
 
+# POSIX sh scripts run on the world's storage root ($1 = the config directory: <home>/config on a host, /config in a pod).
+LIST_SCRIPT='R=$1; W=$2
+for d in "$R"/worlds_local/"$W"_backup_auto-*; do
+  [ -d "$d" ] || continue; n=${d##*_backup_auto-}
+  s=$(ls "$d" 2>/dev/null | sed -n "s/^_main\.\([0-9][0-9]*\)\.ok$/\1/p" | tail -1)
+  printf "g\t%s\t%s\t%s\n" "$n" "${s:-?}" "$(du -sk "$d" | cut -f1)"
+done
+for z in "$R"/backups/worlds-*.zip; do
+  [ -f "$z" ] || continue; n=${z##*/worlds-}; n=${n%.zip}
+  printf "z\t%s\t?\t%s\n" "$n" "$(( $(wc -c <"$z") / 1024 ))"
+done
+for d in "$R"/parked/"$W"-*; do
+  [ -d "$d" ] || continue; n=${d##*/"$W"-}
+  s=$(ls "$d" 2>/dev/null | sed -n "s/^_main\.\([0-9][0-9]*\)\.ok$/\1/p" | tail -1)
+  printf "p\t%s\t%s\t%s\n" "$n" "${s:-?}" "$(du -sk "$d" | cut -f1)"
+done'
+
+RESTORE_SCRIPT='set -eu
+R=$1; W=$2; KIND=$3; SRC=$4; PARK=$5
+WL="$R/worlds_local"; mkdir -p "$R/parked"
+if [ -d "$WL/$W" ]; then mv "$WL/$W" "$R/parked/$PARK"; fi
+case $KIND in
+  g) cp -a "$WL/${W}_backup_auto-$SRC" "$WL/$W";;
+  p) cp -a "$R/parked/$W-$SRC" "$WL/$W";;
+  z) T=$(mktemp -d); unzip -q "$R/backups/worlds-$SRC.zip" "config/worlds_local/$W/*" -d "$T"
+     cp -a "$T/config/worlds_local/$W" "$WL/$W"; rm -rf "$T";;
+  s) mkdir -p "$WL"; tar -xzf - -C "$WL";;
+  *) echo "unknown source $KIND" >&2; exit 2;;
+esac
+if ls "$WL/$W" 2>/dev/null | grep -q "^_main\.[0-9][0-9]*\.ok$" || ls "$WL/$W"/*.fwl >/dev/null 2>&1; then echo RESTORED; else echo INVALID >&2; exit 3; fi'
+
+ROLLBACK_SCRIPT='set -eu
+R=$1; W=$2; PARK=$3; WL="$R/worlds_local"
+rm -rf "$WL/$W"
+if [ -d "$R/parked/$PARK" ]; then mv "$R/parked/$PARK" "$WL/$W"; fi
+echo ROLLED_BACK'
+
 # ================================================================ docker / podman backend (dk_*)
 dk_plan() {
-  PORTS=(-p "$GAME_PORT:2456/udp" -p "$((GAME_PORT + 1)):2457/udp" -p "$((GAME_PORT + 2)):2458/udp")
-  [[ ${CFG[STATUS_HTTP]:-} != true ]] || PORTS+=(-p "$STATUS_PORT:80/tcp")
-  [[ ${CFG[SUPERVISOR_HTTP]:-} != true ]] || PORTS+=(-p "$SUP_PORT:9001/tcp")
+  PORTS=(-p "$GAME_PORT:$GAME_PORT/udp" -p "$QUERY_PORT:$QUERY_PORT/udp")
+  [[ $PUB_STATUS != true ]] || PORTS+=(-p "$STATUS_PORT:80/tcp")
+  [[ $PUB_CONTROL != true ]] || PORTS+=(-p "$CONTROL_PORT:9001/tcp")
   MOUNTS=(-v "$HOMEDIR/config:/config" -v "$HOMEDIR/data:/opt/valheim" -v "$SF_SERVER:/run/secrets/server_pass:ro")
   [[ -z $SF_SUP ]] || MOUNTS+=(-v "$SF_SUP:/run/secrets/supervisor_pass:ro")
   # password files are not in the env, so a label records their mtime/size to notice password changes
   SECRETS_LABEL=$(stat -c '%Y:%s' "$SF_SERVER" ${SF_SUP:+"$SF_SUP"} 2>/dev/null | tr '\n' ',' || true)
+  PORTS_LABEL="${PORTS[*]}"   # published ports are not in the env, so a label lets a port change be noticed
 }
+dk_root()    { echo "$HOMEDIR/config"; }
 dk_exists()  { "$DOCKER" inspect "$C" >/dev/null 2>&1; }
 dk_running() { [[ $("$DOCKER" inspect -f '{{.State.Running}}' "$C" 2>/dev/null || true) == true ]]; }
 dk_world_exists() { [[ -d $HOMEDIR/config/worlds_local/$WORLD || -f $HOMEDIR/config/worlds_local/$WORLD.fwl ]]; }
-dk_players() {
-  curl -fsS -m5 "http://127.0.0.1:$STATUS_PORT/status.json" 2>/dev/null | grep -o '"player_count": *[0-9]*' | grep -o '[0-9]*$' || true
-}
+dk_exec()    { "$DOCKER" exec "$C" "$@"; }
+dk_players() { dk_running || return 0; dk_exec cat "$STATUS_FILE" 2>/dev/null | status_count || true; }
 dk_cur_env() { # running container's managed env + secrets label, real passwords masked, sorted
   local l k
   { "$DOCKER" inspect "$C" --format '{{range .Config.Env}}{{println .}}{{end}}' | while IFS= read -r l; do
@@ -222,66 +294,93 @@ dk_cur_env() { # running container's managed env + secrets label, real passwords
       fi
     done
     "$DOCKER" inspect "$C" --format 'valheimctl.secrets={{index .Config.Labels "valheimctl.secrets"}}'
+    "$DOCKER" inspect "$C" --format 'valheimctl.ports={{index .Config.Labels "valheimctl.ports"}}'
   } | sort
 }
 dk_diff() { # prints the diff; returns 0 if there is a difference
   dk_plan
-  local want; want=$({ printf '%s\n' "${ENVS[@]}"; echo "valheimctl.secrets=$SECRETS_LABEL"; } | sort)
+  local want; want=$({ printf '%s\n' "${ENVS[@]}"; echo "valheimctl.secrets=$SECRETS_LABEL"; echo "valheimctl.ports=$PORTS_LABEL"; } | sort)
   if ! dk_exists; then info "container $C does not exist yet; will be created with:"; printf '    %s\n' "${ENVS[@]}"; return 0; fi
   diff -u <(dk_cur_env) <(printf '%s\n' "$want") | tail -n +3 || true
   ! diff -q <(dk_cur_env) <(printf '%s\n' "$want") >/dev/null
 }
-dk_backup() {
+dk_world_sh() { # SCRIPT ARGS... ; world storage root is passed first; stdin passes through
+  local script=$1; shift
+  sh -c "$script" sh "$HOMEDIR/config" "$WORLD" "$@"
+}
+dk_snapshot() { # [TAG] : tarball of the live world into the backup dir (works with the container stopped)
   dk_world_exists || { info "no existing world to back up"; return 0; }
-  local ts f d="$HOMEDIR/config/worlds_local"; ts=$(date +%Y%m%d-%H%M%S); f="$BACKUPS/$WORLD-$ts.tgz"
+  local tag=${1:-} ts f d="$HOMEDIR/config/worlds_local"; ts=$(utc_stamp); f="$BACKUPS/$WORLD-${tag:+$tag-}$ts.tgz"
   run mkdir -p "$BACKUPS"
   if [[ -d $d/$WORLD ]]; then run tar -C "$d" -czf "$f" "$WORLD"; else run tar -C "$d" -czf "$f" "$WORLD.fwl" "$WORLD.db"; fi
   info "backup: $f"; prune_backups
 }
+dk_backup() { dk_snapshot ""; }
 dk_deploy() {
   dk_plan
   if ((PULL)); then run "$DOCKER" pull "$IMAGE"; fi
+  local legacy=${CFG[LEGACY_CONTAINER]:-}
+  if [[ -n $legacy && $legacy != "$C" ]] && "$DOCKER" inspect "$legacy" >/dev/null 2>&1; then
+    info "removing adopted container $legacy (replaced by $C; its world data is not touched)"
+    run "$DOCKER" stop -t 60 "$legacy"; run "$DOCKER" rm "$legacy"
+  fi
   if dk_exists; then run "$DOCKER" stop -t 60 "$C"; run "$DOCKER" rm "$C"; fi
   run mkdir -p "$HOMEDIR/config" "$HOMEDIR/data"
   local eargs=() e; for e in "${ENVS[@]}"; do eargs+=(-e "$e"); done
   run "$DOCKER" run -d --name "$C" --restart unless-stopped --cap-add SYS_NICE \
-    --label "valheimctl.secrets=$SECRETS_LABEL" \
+    --label "valheimctl.instance=$INSTANCE" --label "valheimctl.world=$NN" --label "valheimctl.secrets=$SECRETS_LABEL" --label "valheimctl.ports=$PORTS_LABEL" \
     --log-opt max-size=10m --log-opt max-file=3 "${PORTS[@]}" "${MOUNTS[@]}" "${eargs[@]}" "$IMAGE"
 }
 dk_wait()    { wait_for_log "$DOCKER" logs "$C"; }
 dk_remove()  { run "$DOCKER" stop -t 60 "$C"; run "$DOCKER" rm "$C"; }
 dk_logs()    { "$DOCKER" logs "$@" "$C"; }
-dk_restart() { run "$DOCKER" exec "$C" supervisorctl restart valheim-server; }
+dk_stop_world()  { run "$DOCKER" stop -t 60 "$C"; }
+dk_start_world() { run "$DOCKER" start "$C"; }
 dk_import()  { run mkdir -p "$HOMEDIR/config/worlds_local" "$HOMEDIR/data"; run tar -xzf "$1" -C "$HOMEDIR/config/worlds_local"; }
 dk_status_extra() {
-  echo "ports:     udp $GAME_PORT-$((GAME_PORT + 2))  status tcp $STATUS_PORT  supervisor tcp $SUP_PORT"
-  echo "state:     $("$DOCKER" inspect -f '{{.State.Status}} since {{.State.StartedAt}}' "$C" 2>/dev/null || echo 'no container')"
+  echo "ports:     udp $GAME_PORT-$QUERY_PORT$([[ $PUB_STATUS == true ]] && echo "  status tcp $STATUS_PORT")$([[ $PUB_CONTROL == true ]] && echo "  supervisor tcp $CONTROL_PORT")"
+  local s; s=$("$DOCKER" inspect -f '{{.State.Status}} since {{.State.StartedAt}}' "$C" 2>/dev/null) || s=""
+  echo "state:     ${s:-no container}"
 }
-dk_state() { "$DOCKER" inspect -f '{{.State.Status}}' "$C" 2>/dev/null || echo none; }
+dk_state() { local s; s=$("$DOCKER" inspect -f '{{.State.Status}}' "$C" 2>/dev/null) || s=""; echo "${s:-none}"; }
 dk_mem()   { "$DOCKER" stats --no-stream --format '{{.Name}} {{.MemUsage}}' 2>/dev/null | awk -v c="$C" '$1==c{print $2}' || true; }
 dk_world_in_use() { dk_running; }
 dk_current_world() { "$DOCKER" inspect "$C" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^WORLD_NAME=//p'; }
+dk_logs_since() { "$DOCKER" logs --since "$1" "$C" 2>&1; }
 
 # ================================================================ kubernetes backend (k8_*)
 kc()  { local a=(); [[ -z $KCTX ]] || a=(--context "$KCTX"); "$KUBECTL" "${a[@]}" -n "$NS" "$@"; }
 kcg() { local a=(); [[ -z $KCTX ]] || a=(--context "$KCTX"); "$KUBECTL" "${a[@]}" "$@"; }   # cluster-scoped / no namespace
 krun() { if ((DRY)); then printf '[dry-run] kubectl -n %s' "$NS"; printf ' %q' "$@"; echo; else kc "$@"; fi; }
-ystr()  { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf '"%s"' "$s"; }                      # YAML-safe double-quoted string
-ylabels() { printf '%sapp.kubernetes.io/name: valheim-server\n%sapp.kubernetes.io/instance: %s\n%sapp.kubernetes.io/managed-by: valheimctl\n' "$1" "$1" "$C" "$1"; }
+ystr() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf '"%s"' "$s"; }                      # YAML-safe double-quoted string
+ylabels() { printf '%sapp.kubernetes.io/name: valheim-server\n%sapp.kubernetes.io/instance: %s\n%sapp.kubernetes.io/managed-by: valheimctl\n%svalheimctl.io/instance: %s\n' "$1" "$1" "$C" "$1" "$1" "$INSTANCE"; }
 
+k8_root()    { echo /config; }
 k8_exists()  { kc get deployment "$C" >/dev/null 2>&1; }
 k8_pod()     { kc get pod -l "app.kubernetes.io/instance=$C" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true; }
 k8_running() { [[ $(kc get deployment "$C" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true) =~ ^[1-9] ]]; }
-k8_players() {
-  local pod a=(); pod=$(k8_pod); [[ -n $pod ]] || return 0
-  [[ -z $KCTX ]] || a=(--context "$KCTX")
-  "$KUBECTL" "${a[@]}" get --raw "/api/v1/namespaces/$NS/pods/$pod:80/proxy/status.json" 2>/dev/null \
-    | grep -o '"player_count": *[0-9]*' | grep -o '[0-9]*$' || true
-}
+k8_exec()    { kc exec "deployment/$C" -- "$@"; }
+k8_players() { k8_running || return 0; k8_exec cat "$STATUS_FILE" 2>/dev/null | status_count || true; }
 k8_world_exists() {
   [[ $(kc get pvc "$C-config" -o jsonpath='{.metadata.annotations.valheimctl\.io/world}' 2>/dev/null || true) == "$WORLD" ]] && return 0
   local pod; pod=$(k8_pod); [[ -n $pod ]] || return 1
   kc exec "$pod" -- sh -c "test -d '/config/worlds_local/$WORLD' || test -f '/config/worlds_local/$WORLD.fwl'" >/dev/null 2>&1
+}
+
+k8_helper_up() { # a short-lived pod that mounts the config volume (used while the world is scaled to zero)
+  kc delete pod "$C-helper" --ignore-not-found >/dev/null
+  { echo "apiVersion: v1"; echo "kind: Pod"; echo "metadata:"; echo "  name: $C-helper"; echo "  namespace: $NS"
+    echo "  labels: {valheimctl.io/helper: \"true\", valheimctl.io/instance: $INSTANCE}"
+    echo "spec:"; echo "  restartPolicy: Never"; echo "  containers:"; echo "    - name: helper"; echo "      image: $(ystr "$IMAGE")"
+    echo "      command: [\"sh\", \"-c\", \"sleep 1800\"]"; echo "      volumeMounts: [{name: config, mountPath: /config}]"
+    echo "  volumes:"; echo "    - name: config"; echo "      persistentVolumeClaim: {claimName: $C-config}"; } | kc apply -f - >/dev/null
+  kc wait --for=condition=Ready "pod/$C-helper" --timeout=180s >/dev/null
+}
+k8_helper_down() { kc delete pod "$C-helper" --ignore-not-found >/dev/null; }
+k8_world_sh() { # SCRIPT ARGS... ; runs in the running pod, or in a helper pod when the world is stopped
+  local script=$1; shift
+  if k8_running; then kc exec -i "deployment/$C" -- sh -c "$script" sh /config "$WORLD" "$@"
+  else k8_helper_up; local rc=0; kc exec -i "$C-helper" -- sh -c "$script" sh /config "$WORLD" "$@" || rc=$?; k8_helper_down; return $rc; fi
 }
 
 k8_secret_differs() { # returns 0 if the cluster Secret differs from the local password files (never prints values)
@@ -299,7 +398,7 @@ k8_secret_apply() {
   local args=(--from-file=server_pass="$SF_SERVER"); [[ -z $SF_SUP ]] || args+=(--from-file=supervisor_pass="$SF_SUP")
   if ((DRY)); then echo "[dry-run] kubectl create secret generic $C ${args[*]%%=*}... | kubectl apply -f -   (contents never shown)"; return 0; fi
   kc create secret generic "$C" "${args[@]}" --dry-run=client -o yaml | kc apply -f - >/dev/null
-  kc label secret "$C" --overwrite app.kubernetes.io/name=valheim-server app.kubernetes.io/instance="$C" app.kubernetes.io/managed-by=valheimctl >/dev/null
+  kc label secret "$C" --overwrite app.kubernetes.io/name=valheim-server app.kubernetes.io/instance="$C" app.kubernetes.io/managed-by=valheimctl valheimctl.io/instance="$INSTANCE" >/dev/null
 }
 k8_secret_rv() { kc get secret "$C" -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || echo none; }
 
@@ -309,7 +408,7 @@ k8_manifest() { # $1 = secret resourceVersion (changes the pod template, so a pa
   local pull=${CFG[K8S_PULL_POLICY]:-IfNotPresent} sc=${CFG[K8S_STORAGE_CLASS]:-}
   case $expose in loadbalancer|hostport|none) :;; *) die "K8S_EXPOSE must be loadbalancer, hostport or none";; esac
   case $webexp in loadbalancer|none) :;; *) die "K8S_EXPOSE_WEB must be none or loadbalancer";; esac
-  local status=0 sup=0; [[ ${CFG[STATUS_HTTP]:-} == true ]] && status=1; [[ ${CFG[SUPERVISOR_HTTP]:-} == true ]] && sup=1
+  local status=0 sup=0; [[ $PUB_STATUS == true ]] && status=1; [[ $PUB_CONTROL == true ]] && sup=1
   local pvc
   for pvc in config data; do
     local size=${CFG[K8S_CONFIG_SIZE]:-5Gi}; [[ $pvc == data ]] && size=${CFG[K8S_DATA_SIZE]:-10Gi}
@@ -337,11 +436,10 @@ k8_manifest() { # $1 = secret resourceVersion (changes the pod template, so a pa
   echo "          env:"
   for e in "${ENVS[@]}"; do k=${e%%=*}; v=${e#*=}; echo "            - name: $k"; echo "              value: $(ystr "$v")"; done
   echo "          ports:"
-  local i names=(game query extra)
-  for i in 0 1 2; do
-    echo "            - name: ${names[$i]}"; echo "              containerPort: $((2456 + i))"; echo "              protocol: UDP"
-    [[ $expose != hostport ]] || echo "              hostPort: $((GAME_PORT + i))"
-  done
+  echo "            - name: game"; echo "              containerPort: $GAME_PORT"; echo "              protocol: UDP"
+  [[ $expose != hostport ]] || echo "              hostPort: $GAME_PORT"
+  echo "            - name: query"; echo "              containerPort: $QUERY_PORT"; echo "              protocol: UDP"
+  [[ $expose != hostport ]] || echo "              hostPort: $QUERY_PORT"
   ((!status)) || { echo "            - name: status"; echo "              containerPort: 80"; echo "              protocol: TCP"; }
   ((!sup)) || { echo "            - name: supervisor"; echo "              containerPort: 9001"; echo "              protocol: TCP"; }
   echo "          resources:"; echo "            requests:"
@@ -366,9 +464,8 @@ k8_manifest() { # $1 = secret resourceVersion (changes the pod template, so a pa
     echo "spec:"; echo "  type: LoadBalancer"
     [[ -z ${CFG[K8S_LB_IP]:-} ]] || echo "  loadBalancerIP: $(ystr "${CFG[K8S_LB_IP]}")"
     echo "  selector:"; echo "    app.kubernetes.io/instance: $C"; echo "  ports:"
-    for i in 0 1 2; do
-      echo "    - name: ${names[$i]}"; echo "      protocol: UDP"; echo "      port: $((GAME_PORT + i))"; echo "      targetPort: ${names[$i]}"
-    done
+    echo "    - name: game"; echo "      protocol: UDP"; echo "      port: $GAME_PORT"; echo "      targetPort: game"
+    echo "    - name: query"; echo "      protocol: UDP"; echo "      port: $QUERY_PORT"; echo "      targetPort: query"
   fi
   if ((status || sup)); then
     echo "---"; echo "apiVersion: v1"; echo "kind: Service"
@@ -376,7 +473,7 @@ k8_manifest() { # $1 = secret resourceVersion (changes the pod template, so a pa
     echo "spec:"; if [[ $webexp == loadbalancer ]]; then echo "  type: LoadBalancer"; else echo "  type: ClusterIP"; fi
     echo "  selector:"; echo "    app.kubernetes.io/instance: $C"; echo "  ports:"
     ((!status)) || { echo "    - name: status"; echo "      port: $STATUS_PORT"; echo "      targetPort: status"; }
-    ((!sup)) || { echo "    - name: supervisor"; echo "      port: $SUP_PORT"; echo "      targetPort: supervisor"; }
+    ((!sup)) || { echo "    - name: supervisor"; echo "      port: $CONTROL_PORT"; echo "      targetPort: supervisor"; }
   fi
 }
 
@@ -389,27 +486,22 @@ k8_diff() { # prints the diff; returns 0 if there is a difference
   case $rc in 0) ;; 1) changed=0;; *) die "kubectl diff failed (exit $rc)";; esac
   return $changed
 }
-k8_backup() {
-  local pod; pod=$(k8_pod)
-  [[ -n $pod ]] || { info "no running pod to back up from; skipping backup"; return 0; }
+k8_snapshot() { # [TAG] : stream a tarball of the world out of the pod (or a helper pod when the world is stopped)
   k8_world_exists || { info "no existing world to back up"; return 0; }
-  local ts f; ts=$(date +%Y%m%d-%H%M%S); f="$BACKUPS/$WORLD-$ts.tgz"
+  local tag=${1:-} ts f; ts=$(utc_stamp); f="$BACKUPS/$WORLD-${tag:+$tag-}$ts.tgz"
   run mkdir -p "$BACKUPS"
-  if ((DRY)); then echo "[dry-run] kubectl exec $pod -- tar -C /config/worlds_local -czf - $WORLD > $f"; return 0; fi
-  if kc exec "$pod" -- test -d "/config/worlds_local/$WORLD" >/dev/null 2>&1; then
-    kc exec "$pod" -- tar -C /config/worlds_local -czf - "$WORLD" >"$f" || { rm -f "$f"; die "backup from pod failed; nothing was changed"; }
-  else
-    kc exec "$pod" -- tar -C /config/worlds_local -czf - "$WORLD.fwl" "$WORLD.db" >"$f" || { rm -f "$f"; die "backup from pod failed; nothing was changed"; }
-  fi
+  if ((DRY)); then echo "[dry-run] tar the world out of the pod > $f"; return 0; fi
+  local script='R=$1; W=$2; cd "$R/worlds_local" && if [ -d "$W" ]; then tar -czf - "$W"; else tar -czf - "$W.fwl" "$W.db"; fi'
+  k8_world_sh "$script" >"$f" || { rm -f "$f"; die "backup from the world volume failed; nothing was changed"; }
   info "backup: $f"; prune_backups
 }
+k8_backup() { k8_snapshot ""; }
 k8_deploy() {
   if ((PULL)); then die "--pull is not supported on k8s: set K8S_PULL_POLICY=Always in fleet.env (the tag is then re-checked whenever the pod starts)"; fi
   local rv
   if ((DRY)); then
     info "manifest that would be applied to namespace $NS:"; k8_secret_apply; k8_manifest "<secret-resourceVersion>"; return 0
   fi
-  kcg create namespace "$NS" --dry-run=client -o yaml | kcg apply -f - >/dev/null
   k8_secret_apply; rv=$(k8_secret_rv)
   k8_manifest "$rv" | kc apply -f -
 }
@@ -420,26 +512,22 @@ k8_wait() {
 }
 k8_remove()  { krun delete deployment,service -l "app.kubernetes.io/instance=$C"; }
 k8_logs()    { kc logs "$@" "deployment/$C"; }
-k8_restart() { krun exec "deployment/$C" -- supervisorctl restart valheim-server; }
+k8_stop_world()  { krun scale deployment "$C" --replicas=0; if ((!DRY)); then kc wait --for=delete pod -l "app.kubernetes.io/instance=$C" --timeout=120s >/dev/null 2>&1 || true; fi; }
+k8_start_world() { krun scale deployment "$C" --replicas=1; }
 k8_import() { # create PVCs/Secret/Deployment at 0 replicas, untar the world through a helper pod, record the world
   k8_exists && k8_running && die "$C is running; scale it down first (valheimctl rm $NN) so the volume can be written"
   REPLICAS=0
   k8_deploy
-  if ((DRY)); then echo "[dry-run] helper pod $C-import mounts $C-config, untars $1 into /config/worlds_local, then is deleted"; return 0; fi
-  kc delete pod "$C-import" --ignore-not-found >/dev/null
-  { echo "apiVersion: v1"; echo "kind: Pod"; echo "metadata:"; echo "  name: $C-import"; echo "  namespace: $NS"
-    echo "spec:"; echo "  restartPolicy: Never"; echo "  containers:"; echo "    - name: import"; echo "      image: $(ystr "$IMAGE")"
-    echo "      command: [\"sh\", \"-c\", \"sleep 1800\"]"; echo "      volumeMounts: [{name: config, mountPath: /config}]"
-    echo "  volumes:"; echo "    - name: config"; echo "      persistentVolumeClaim: {claimName: $C-config}"; } | kc apply -f - >/dev/null
-  kc wait --for=condition=Ready "pod/$C-import" --timeout=180s >/dev/null
-  kc exec -i "$C-import" -- sh -c 'mkdir -p /config/worlds_local && tar -xzf - -C /config/worlds_local' <"$1"
-  kc delete pod "$C-import" >/dev/null
+  if ((DRY)); then echo "[dry-run] helper pod $C-helper mounts $C-config, untars $1 into /config/worlds_local, then is deleted"; return 0; fi
+  k8_helper_up
+  kc exec -i "$C-helper" -- sh -c 'mkdir -p /config/worlds_local && tar -xzf - -C /config/worlds_local' <"$1" || { k8_helper_down; die "import into the volume failed"; }
+  k8_helper_down
   kc annotate pvc "$C-config" --overwrite "valheimctl.io/world=$WORLD" >/dev/null
   info "imported $1 into $NS/$C-config; now run: valheimctl apply $NN"
 }
 k8_status_extra() {
   echo "namespace: $NS   expose: ${CFG[K8S_EXPOSE]:-loadbalancer}   web: ${CFG[K8S_EXPOSE_WEB]:-none}"
-  echo "ports:     udp $GAME_PORT-$((GAME_PORT + 2))  (service $C-game)   status/supervisor via service $C-web"
+  echo "ports:     udp $GAME_PORT-$QUERY_PORT (service $C-game)$([[ $PUB_STATUS == true || $PUB_CONTROL == true ]] && echo "; legacy pages via service $C-web")"
   kc get deployment,pod,service -l "app.kubernetes.io/instance=$C" 2>&1 | sed 's/^/  /' || true
 }
 k8_state() {
@@ -450,6 +538,7 @@ k8_state() {
 k8_mem() { kc top pod -l "app.kubernetes.io/instance=$C" --no-headers 2>/dev/null | awk '{print $3}' | head -1 || true; }
 k8_world_in_use() { k8_exists && [[ $(kc get deployment "$C" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0) != 0 ]]; }
 k8_current_world() { kc get deployment "$C" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="WORLD_NAME")].value}'; }
+k8_logs_since() { kc logs "deployment/$C" --since-time="$1" 2>&1; }
 
 # ---------------------------------------------------------------- commands
 cmd_apply() { # NN : the guarded recreate
@@ -459,10 +548,16 @@ cmd_apply() { # NN : the guarded recreate
   fi
   if be exists && be running && ((!FORCE)); then
     local p; p=$(be players)
-    [[ -n $p ]] || die "cannot read the player count from the status page; pass --force if you are sure nobody is playing"
+    [[ -n $p ]] || die "cannot read the player count from the status file; pass --force if you are sure nobody is playing"
     ((p == 0)) || die "$p player(s) connected to $C; try later or pass --force"
+  elif [[ $FAMILY == dk && -n ${CFG[LEGACY_CONTAINER]:-} ]] && ! dk_exists && ((!FORCE)) \
+       && [[ $("$DOCKER" inspect -f '{{.State.Running}}' "${CFG[LEGACY_CONTAINER]}" 2>/dev/null || true) == true ]]; then
+    # first apply of an adopted world: the old container is the one that may have players
+    local p; p=$("$DOCKER" exec "${CFG[LEGACY_CONTAINER]}" cat "$STATUS_FILE" 2>/dev/null | status_count || true)
+    [[ -n $p ]] || die "cannot read the player count from the adopted container ${CFG[LEGACY_CONTAINER]}; pass --force if you are sure nobody is playing"
+    ((p == 0)) || die "$p player(s) connected to the adopted container ${CFG[LEGACY_CONTAINER]}; try later or pass --force"
   fi
-  info "$C [$BACKEND] world=$WORLD game=udp/$GAME_PORT-$((GAME_PORT + 2)) image=$IMAGE"
+  info "$C [$BACKEND] world=$WORLD game=udp/$GAME_PORT-$QUERY_PORT image=$IMAGE"
   if ! be diff && ((!FORCE)) && be running; then info "no changes for $C; nothing to do"; return 0; fi
   confirm "Apply to $C now (restarts the world)?" || die "aborted"
   be backup
@@ -472,7 +567,7 @@ cmd_apply() { # NN : the guarded recreate
 
 each_world() { # CMD : run a command for every configured world, in order, stopping on failure
   local f n
-  for f in "$ETC"/worlds/[0-9][0-9].env; do
+  for f in "$ETC"/worlds/0[1-9].env; do
     [[ -e $f ]] || continue
     n=$(basename "$f" .env); "$@" "$n"
   done
@@ -507,12 +602,12 @@ cmd_new() {
   if ((DRY)); then info "dry-run: stopping before password setup and apply (nothing was written)"; return 0; fi
   plan_secrets_prompt
   NEWWORLD=1; cmd_apply "$NN"
-  echo "Join: <host>:$((${CFG[PORT_BASE]:-2456} + (N - 1) * 10)) (UDP), world $C-$suffix. Password is in $ETC/secrets/ (not printed)."
+  echo "Join: ${CFG[PUBLIC_HOST]:-<host>}:$GAME_PORT (UDP), world $WORLD. The password is in $ETC/secrets/ (not printed)."
 }
 plan_secrets_prompt() {
   [[ -f $ETC/secrets/$NN.server.pass || -f $ETC/secrets/default.server.pass ]] || cmd_passwd "$NN" server
   local -A fl=(); load_env fl "$ETC/fleet.env"
-  if [[ ${fl[SUPERVISOR_HTTP]:-} == true && ! -f $ETC/secrets/$NN.supervisor.pass && ! -f $ETC/secrets/default.supervisor.pass ]]; then
+  if [[ ${fl[PUBLISH_CONTROL]:-false} == true && ! -f $ETC/secrets/$NN.supervisor.pass && ! -f $ETC/secrets/default.supervisor.pass ]]; then
     cmd_passwd "$NN" supervisor
   fi
   plan "$NN" >/dev/null   # populate CFG for the caller
@@ -534,20 +629,23 @@ cmd_passwd() { # <NN|default> <server|supervisor>
 cmd_adopt() { # create NN.env + password files from a RUNNING docker/podman container, without touching it
   [[ $FAMILY == dk ]] || die "adopt reads a running docker/podman container. For Kubernetes, move worlds with: valheimctl backup (on the old host) then valheimctl import"
   parse_nn "${1:-}"; [[ ! -f $ETC/worlds/$NN.env ]] || die "$ETC/worlds/$NN.env already exists"
-  dk_exists || die "no container $C to adopt"
+  local old=${2:-valheim$NN}
+  "$DOCKER" inspect "$old" >/dev/null 2>&1 || die "no container '$old' to adopt (name it as the second argument: valheimctl adopt $NN <container>)"
   local -A fl=() env=(); load_env fl "$ETC/fleet.env"
-  local l; while IFS= read -r l; do [[ $l == *=* ]] && env[${l%%=*}]=${l#*=}; done < <("$DOCKER" inspect "$C" --format '{{range .Config.Env}}{{println .}}{{end}}')
-  local wn=${env[WORLD_NAME]:-}; [[ $wn == "$C-"* ]] || die "world name '$wn' does not start with '$C-'; cannot derive SUFFIX"
-  local out=("SUFFIX=${wn#"$C"-}") k
+  local l; while IFS= read -r l; do [[ $l == *=* ]] && env[${l%%=*}]=${l#*=}; done < <("$DOCKER" inspect "$old" --format '{{range .Config.Env}}{{println .}}{{end}}')
+  local wn=${env[WORLD_NAME]:-}; [[ $wn == "valheim$NN-"* ]] || die "world name '$wn' does not start with 'valheim$NN-'; cannot derive SUFFIX"
+  local out=("SUFFIX=${wn#valheim"$NN"-}" "LEGACY_CONTAINER=$old") k
   [[ -z ${env[WORLD_SEED]:-} ]] || out+=("SEED=${env[WORLD_SEED]}")
   for k in $(printf '%s\n' "${!env[@]}" | sort); do
     is_known "$k" || continue; [[ $k == UPDATE_CRON ]] && continue
+    [[ $k == SUPERVISOR_HTTP || $k == STATUS_HTTP ]] && continue
     [[ ${env[$k]} == "${fl[$k]:-}" ]] || { [[ $k == SERVER_NAME && ${env[$k]} == "$wn" ]] || out+=("$k=${env[$k]}"); }
   done
-  printf '%s\n' "# adopted from running container $C" "${out[@]}" | put "$ETC/worlds/$NN.env" 0644
+  printf '%s\n' "# adopted from running container $old" "${out[@]}" | put "$ETC/worlds/$NN.env" 0644
   [[ -z ${env[SERVER_PASS]:-} || -f $ETC/secrets/$NN.server.pass ]] || printf '%s' "${env[SERVER_PASS]}" | put "$ETC/secrets/$NN.server.pass" 0600
-  [[ -z ${env[SUPERVISOR_HTTP_PASS]:-} || -f $ETC/secrets/$NN.supervisor.pass ]] || printf '%s' "${env[SUPERVISOR_HTTP_PASS]}" | put "$ETC/secrets/$NN.supervisor.pass" 0600
-  info "adopted $C; review $ETC/worlds/$NN.env, then 'valheimctl apply $NN' (a recreate; shows a diff first)"
+  info "adopted $old; review $ETC/worlds/$NN.env."
+  echo "Old published game port: $("$DOCKER" port "$old" 2>/dev/null | grep udp | head -1 | sed 's/.*://' || true). The tool's port for world $NN will be on the next 'apply'; set HONOR_ORIGINAL_PORTS=true in fleet.env to keep 2456/2466/..."
+  echo "'valheimctl apply $NN' recreates the container once under the new name (world data is untouched and is backed up first)."
 }
 
 cmd_import() { # NN FILE.tgz : put an existing world (archive from `valheimctl backup`) into this backend before first start
@@ -562,41 +660,183 @@ cmd_import() { # NN FILE.tgz : put an existing world (archive from `valheimctl b
 }
 
 cmd_list() {
-  printf '%-3s %-26s %-11s %-12s %-7s %s\n' NN WORLD GAME-UDP STATE PLAYERS MEM
-  local f n
-  for f in "$ETC"/worlds/[0-9][0-9].env; do
+  local f n rows=()
+  for f in "$ETC"/worlds/0[1-9].env; do
     [[ -e $f ]] || continue; n=$(basename "$f" .env)
-    ( if (plan "$n" >/dev/null 2>&1); then plan "$n"; else WORLD="(config error)"; GAME_PORT="?"; C="valheim$n"; NS=valheim; fi
+    rows+=("$( if (plan "$n" >/dev/null 2>&1); then plan "$n"; else WORLD="(config error)"; GAME_PORT="?"; C="valheim-main-$n"; NS=valheim; fi
       st=$(be state); p=""; [[ $st == running || $st == ready* ]] && p=$(be players)
-      printf '%-3s %-26s %-11s %-12s %-7s %s\n' "$n" "$WORLD" "$GAME_PORT" "$st" "${p:--}" "$(be mem || true)" )
+      printf '%s\t%s\t%s\t%s\t%s\t%s' "$n" "$WORLD" "$GAME_PORT" "$st" "${p:--}" "$(be mem || true)" )")
   done
+  if ((JSON)); then
+    local r first=1 a; printf '['
+    for r in "${rows[@]}"; do IFS=$'\t' read -ra a <<<"$r"; ((first)) || printf ','; first=0
+      printf '{"world":%s,"name":%s,"game_port":%s,"state":%s,"players":%s,"memory":%s}' "$(json_str "${a[0]}")" "$(json_str "${a[1]}")" "$(json_str "${a[2]}")" "$(json_str "${a[3]}")" "$(json_str "${a[4]:--}")" "$(json_str "${a[5]:--}")"; done
+    printf ']\n'
+  else
+    printf '%-3s %-26s %-10s %-12s %-7s %s\n' NN WORLD GAME-UDP STATE PLAYERS MEM
+    for r in "${rows[@]}"; do IFS=$'\t' read -ra a <<<"$r"; printf '%-3s %-26s %-10s %-12s %-7s %s\n' "${a[0]}" "${a[1]}" "${a[2]}" "${a[3]}" "${a[4]:--}" "${a[5]:--}"; done
+  fi
 }
 
 cmd_status() {
   plan "${1:-}"
-  echo "backend:   $BACKEND     world: $WORLD     image: $IMAGE"
-  echo "update:    ${CFG[UPDATE_CRON]:-$UPDATE_CRON_DERIVED} (UTC unless TZ set)"
+  echo "backend:   $BACKEND   instance: $INSTANCE   world: $WORLD   image: $IMAGE"
+  echo "update:    ${CFG[UPDATE_CRON]:-$UPDATE_CRON_DERIVED} (container time, UTC unless TZ is set)"
+  echo "join:      ${CFG[PUBLIC_HOST]:-<host>}:$GAME_PORT (UDP)"
   be status_extra
   echo "players:   $(be players)"
   echo "last backup: $(ls -1t "$BACKUPS/$WORLD-"*.tgz 2>/dev/null | head -1 || true)"
   echo "-- config drift:"; if be exists; then be diff || true; else echo "(not deployed)"; fi
 }
 
+cmd_services() { # NN : the container's supervisord program table (replaces the legacy supervisor web page)
+  plan "${1:-}"
+  be running || die "$C is not running"
+  local out; out=$(be exec supervisorctl status)
+  if ((JSON)); then
+    local first=1 name state rest; printf '['
+    while read -r name state rest; do [[ -n $name ]] || continue; ((first)) || printf ','; first=0
+      printf '{"name":%s,"state":%s,"detail":%s}' "$(json_str "$name")" "$(json_str "$state")" "$(json_str "$rest")"; done <<<"$out"
+    printf ']\n'
+  else printf '%s\n' "$out"; fi
+}
+
+cmd_service() { # NN NAME ACTION : allowlisted actions on the container's programs
+  local nn=${1:-} name=${2:-} act=${3:-}; [[ -n $act ]] || die "usage: valheimctl service NN valheim-server start|stop|restart   |   service NN valheim-backup|valheim-updater run"
+  plan "$nn"; be running || die "$C is not running"
+  case "$name:$act" in
+    valheim-server:start|valheim-server:stop|valheim-server:restart)
+      if [[ $act != start ]] && ((!FORCE)); then
+        local p; p=$(be players); [[ -n $p ]] || die "cannot read the player count; pass --force"; ((p == 0)) || die "$p player(s) connected; pass --force to $act anyway"
+      fi
+      confirm "$act $name in $C?" || die "aborted"; run_exec supervisorctl "$act" valheim-server;;
+    valheim-backup:run) run_exec sh -c 'kill -HUP "$(cat /var/run/valheim/valheim-backup.pid)"';;
+    valheim-updater:run) run_exec sh -c 'kill -HUP "$(cat /var/run/valheim/valheim-updater.pid)"';;
+    *) die "not allowed: $name $act (allowed: valheim-server start|stop|restart; valheim-backup run; valheim-updater run)";;
+  esac
+}
+run_exec() { if ((DRY)); then printf '[dry-run] exec in %s:' "$C"; printf ' %q' "$@"; echo; else be exec "$@"; fi; }
+
+cmd_stop()  { plan "${1:-}"; be exists || die "$C is not deployed"
+  if be running && ((!FORCE)); then local p; p=$(be players); [[ -n $p ]] || die "cannot read the player count; pass --force"; ((p == 0)) || die "$p player(s) connected; pass --force to stop anyway"; fi
+  confirm "Stop $C (the world saves first)?" || die "aborted"; be stop_world; }
+cmd_start() { plan "${1:-}"; be exists || die "$C is not deployed; use apply"; be start_world; }
+
+# -------- backups: list and restore
+# collect_backups : fills B_ID/B_SRC/B_STAMP/B_SAVE/B_SIZE (newest first) from the world's storage and the local snapshots
+collect_backups() {
+  B_ID=() B_SRC=() B_STAMP=() B_SAVE=() B_SIZE=()
+  local lines kind stamp save size
+  lines=$(be world_sh "$LIST_SCRIPT" </dev/null 2>/dev/null || true)
+  { printf '%s\n' "$lines"
+    local f n; for f in "$BACKUPS/$WORLD-"*.tgz; do [[ -f $f ]] || continue
+      n=${f%.tgz}; stamp=${n: -15}; printf 's\t%s\t?\t%s\n' "$stamp" "$(( $(wc -c <"$f") / 1024 ))"; done
+  } | sort -t$'\t' -k2,2r | while IFS=$'\t' read -r kind stamp save size; do
+    [[ -n $kind ]] || continue; printf '%s\t%s\t%s\t%s\n' "$kind" "$stamp" "$save" "$size"
+  done >"${TMPDIR:-/tmp}/vc.$$.list"
+  while IFS=$'\t' read -r kind stamp save size; do
+    B_ID+=("$kind:$stamp"); B_SRC+=("$kind"); B_STAMP+=("$stamp"); B_SAVE+=("$save"); B_SIZE+=("$size")
+  done <"${TMPDIR:-/tmp}/vc.$$.list"
+  rm -f "${TMPDIR:-/tmp}/vc.$$.list"
+}
+src_name() { case $1 in g) echo game-auto;; z) echo image-zip;; s) echo snapshot;; p) echo parked;; *) echo "$1";; esac; }
+stamp_local() { # YYYYMMDD-HHMMSS (UTC) -> local display time
+  local s=$1 tz=${CFG[DISPLAY_TZ]:-}
+  local iso="${s:0:4}-${s:4:2}-${s:6:2} ${s:9:2}:${s:11:2}:${s:13:2} UTC"
+  if [[ -n $tz ]]; then TZ=$tz date -d "$iso" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || echo "$s"; else date -d "$iso" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || echo "$s"; fi
+}
+journal_file() { echo "$ETC/journal/$NN.jsonl"; }
+last_restore_stamp() { local j; j=$(journal_file); [[ -f $j ]] && sed -n 's/.*"when_utc":"\([0-9]\{8\}-[0-9]\{6\}\)".*/\1/p' "$j" | tail -1 || true; }
+
+cmd_backups() { # list NN
+  [[ ${1:-} == list ]] || die "usage: valheimctl backups list NN [--json]"; shift
+  plan "${1:-}"
+  collect_backups
+  local lr i first=1 ep; lr=$(last_restore_stamp)
+  if ((JSON)); then printf '['
+  else printf '%-24s %-10s %-20s %-22s %-6s %-8s %s\n' ID SOURCE "CREATED (UTC)" LOCAL SAVE SIZE "VS LAST RESTORE"; fi
+  for i in "${!B_ID[@]}"; do
+    local st=${B_STAMP[$i]} iso="${B_STAMP[$i]:0:4}-${B_STAMP[$i]:4:2}-${B_STAMP[$i]:6:2} ${B_STAMP[$i]:9:2}:${B_STAMP[$i]:11:2}:${B_STAMP[$i]:13:2}"
+    ep=-; if [[ -n $lr ]]; then if [[ $st < $lr ]]; then ep=before; else ep=after; fi; fi
+    if ((JSON)); then ((first)) || printf ','; first=0
+      printf '{"id":%s,"source":%s,"created_utc":%s,"save":%s,"size_kb":%s,"vs_last_restore":%s}' "$(json_str "${B_ID[$i]}")" "$(json_str "$(src_name "${B_SRC[$i]}")")" "$(json_str "$iso")" "$(json_str "${B_SAVE[$i]}")" "$(json_str "${B_SIZE[$i]}")" "$(json_str "$ep")"
+    else printf '%-24s %-10s %-20s %-22s %-6s %-8s %s\n' "${B_ID[$i]}" "$(src_name "${B_SRC[$i]}")" "$iso" "$(stamp_local "$st")" "${B_SAVE[$i]}" "$((B_SIZE[$i] / 1024))M" "$ep"; fi
+  done
+  if ((JSON)); then printf ']\n'; fi
+}
+
+backup_save_number() { # SRC STAMP -> the save number a backup will restore (best effort, "?" when unknown)
+  local i; for i in "${!B_ID[@]}"; do [[ ${B_ID[$i]} == "$1:$2" ]] && { echo "${B_SAVE[$i]}"; return; }; done; echo "?"
+}
+
+cmd_restore() { # NN ID : stop, snapshot, park, copy, start, verify, journal
+  local nn=${1:-} id=${2:-}; [[ $id =~ ^[gzsp]:[0-9]{8}-[0-9]{6}(-[A-Za-z0-9_-]+)?$ ]] || die "usage: valheimctl restore NN ID   (IDs come from: valheimctl backups list NN)"
+  plan "$nn"
+  local kind=${id%%:*} src=${id#*:} found=0 i want_save="?"
+  collect_backups
+  for i in "${!B_ID[@]}"; do [[ ${B_ID[$i]} == "$id" ]] && { found=1; want_save=${B_SAVE[$i]}; }; done
+  ((found)) || die "no backup with id '$id' for world $WORLD (see: valheimctl backups list $NN)"
+  be exists || die "$C is not deployed; deploy it first (a restore replaces the world data of an existing world)"
+  if be running && ((!FORCE)); then
+    local p; p=$(be players); [[ -n $p ]] || die "cannot read the player count; pass --force if nobody is playing"
+    ((p == 0)) || die "$p player(s) connected; try later or pass --force"
+  fi
+  local stamp; stamp=$(utc_stamp); local park="$WORLD-$stamp-pre-restore" snap=""
+  info "restore $id -> world $WORLD (save number to be restored: $want_save). The current world will be stopped, snapshotted and parked, not deleted."
+  confirm "Restore $id into $C now?" || die "aborted"
+  local since; since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  be stop_world
+  be snapshot pre-restore
+  local arg="${src%%-pre-restore*}"; [[ $kind == p ]] && arg=$src
+  [[ $kind == s ]] && { snap="$BACKUPS/$WORLD-${src}.tgz"; [[ -f $snap ]] || snap=$(ls -1 "$BACKUPS/$WORLD-"*"$src".tgz 2>/dev/null | head -1); }
+  if ((DRY)); then
+    echo "[dry-run] script: park live world as $park; copy source $kind:$src into place; validate"; echo "[dry-run] start $C, wait for 'ZNet.LoadWorld ... save number $want_save'"; return 0
+  fi
+  local rc=0
+  if [[ $kind == s ]]; then be world_sh "$RESTORE_SCRIPT" "$kind" "$src" "$park" <"$snap" || rc=$?
+  else be world_sh "$RESTORE_SCRIPT" "$kind" "$arg" "$park" </dev/null || rc=$?; fi
+  if ((rc)); then
+    warn "restore step failed (exit $rc); putting the previous world back"
+    be world_sh "$ROLLBACK_SCRIPT" "$park" </dev/null || true; be start_world; die "restore failed; previous world restored"
+  fi
+  be start_world
+  verify_restore "$since" "$want_save" || {
+    warn "verification failed; rolling back to the previous world"
+    be stop_world; be world_sh "$ROLLBACK_SCRIPT" "$park" </dev/null || true; be start_world
+    die "restore verification failed; previous world restored from $park"; }
+  mkdir -p "$(dirname "$(journal_file)")"
+  printf '{"when_utc":"%s","user":"%s","from":"%s","restored_save":"%s","parked_to":"%s"}\n' "$stamp" "${USER:-unknown}" "$id" "$want_save" "parked/$park" >>"$(journal_file)"
+  info "restored $id; previous world kept at parked/$park (inside the world's config storage) and as a snapshot in $BACKUPS"
+}
+verify_restore() { # SINCE EXPECTED_SAVE : wait until the server loaded the world and announce the save number
+  local since=$1 want=$2 t=0 out got
+  while ((t < WAIT_SECS)); do
+    out=$(be logs_since "$since" || true)
+    if grep -q 'Game server connected' <<<"$out"; then
+      got=$(grep -o 'LoadWorld: .* save number [0-9]*' <<<"$out" | tail -1 | grep -o '[0-9]*$' || true)
+      info "server reports: loaded save number ${got:-unknown} (expected $want)"
+      [[ $want == "?" || -z $got || $got == "$want" ]] && return 0 || return 1
+    fi
+    sleep 3; t=$((t + 3))
+  done
+  return 1
+}
+
 cmd_check() {
   local rc=0 f n d
   if [[ $BACKEND != k8s ]]; then
     info "world dirs vs configs"
-    for d in "$DATA"/valheim[0-9][0-9]; do
+    for d in "$DATA"/valheim0[1-9]; do
       [[ -d $d ]] || continue; n=${d##*valheim}
       [[ -f $ETC/worlds/$n.env ]] || { warn "$d has no $ETC/worlds/$n.env (unmanaged; try: valheimctl adopt $n)"; rc=1; }
     done
   fi
   local -A seen=()
-  for f in "$ETC"/worlds/[0-9][0-9].env; do
+  for f in "$ETC"/worlds/0[1-9].env; do
     [[ -e $f ]] || continue; n=$(basename "$f" .env)
     ( plan "$n" >/dev/null ) || { rc=1; continue; }
     plan "$n"
-    local pk; for pk in "$GAME_PORT" "$STATUS_PORT" "$SUP_PORT"; do
+    local pk; for pk in "$GAME_PORT" "$QUERY_PORT"; do
       [[ -z ${seen[$pk]:-} ]] || { warn "port $pk used by worlds ${seen[$pk]} and $n"; rc=1; }; seen[$pk]=$n
     done
     if [[ $BACKEND != k8s ]]; then
@@ -604,7 +844,7 @@ cmd_check() {
       # the 'wrong suffix = new empty world' trap: extra real worlds next to the configured one
       local w; for w in "$HOMEDIR"/config/worlds_local/*; do
         [[ -e $w ]] || continue; w=$(basename "$w"); w=${w%.fwl}; w=${w%.db}
-        [[ $w == "$WORLD" || $w == *_backup_auto-* ]] || { warn "$n: extra world '$w' in worlds_local (configured: $WORLD)"; rc=1; }
+        [[ $w == "$WORLD" || $w == *_backup_auto-* ]] || { warn "$n: extra world '$w' in worlds_local (configured: $WORLD); keep parked copies outside worlds_local"; rc=1; }
       done
     fi
     if be exists; then
@@ -612,13 +852,18 @@ cmd_check() {
       [[ $cw == "$WORLD" ]] || { warn "$n: deployed world '$cw' differs from config '$WORLD' (run apply)"; rc=1; }
     else warn "$n: not deployed ($BACKEND)"; fi
   done
-  if [[ $BACKEND != k8s ]]; then info "memory"; free -m 2>/dev/null | sed -n '1,3p' || true; fi
+  if [[ $BACKEND != k8s ]]; then
+    local c; for c in $("$DOCKER" ps -a --filter "label=valheimctl.instance=${CFG[INSTANCE_ID]:-main}" --format '{{.Names}}' 2>/dev/null || true); do
+      [[ $c =~ -(0[1-9])$ ]] && [[ -f $ETC/worlds/${BASH_REMATCH[1]}.env ]] || { warn "container $c carries this instance's label but has no config (orphan)"; rc=1; }
+    done
+    info "memory"; free -m 2>/dev/null | sed -n '1,3p' || true
+  fi
   if ((rc == 0)); then info "check: OK"; else warn "check: problems found"; fi
   return $rc
 }
 
 cmd_backup()  { plan "${1:-}"; be backup; }
-cmd_restart() { plan "${1:-}"; be restart; }
+cmd_restart() { cmd_service "${1:-}" valheim-server restart; }
 cmd_logs()    { plan "${1:-}"; shift || true; be logs "$@"; }
 cmd_rm() {
   plan "${1:-}"; be exists || die "$C is not deployed"
@@ -644,14 +889,14 @@ cmd_init() {
 # Fleet-wide defaults (NO secrets here). Per-world overrides go in worlds/NN.env.
 # BACKEND: docker (default), podman or k8s
 BACKEND=${VALHEIMCTL_BACKEND:-docker}
+INSTANCE_ID=main
 IMAGE=$DEFAULT_IMAGE
 UPDATE_HOURS=0,6,12,18
 BACKUPS_MAX_COUNT=100
-STATUS_HTTP=true
-SUPERVISOR_HTTP=true
-SUPERVISOR_HTTP_USER=admin
 SERVER_PUBLIC=true
 BEPINEX=true
+# Set true to use ports 2456, 2466, ... instead of 2010, 2020, ...
+HONOR_ORIGINAL_PORTS=false
 #ADMINLIST_IDS=7656119xxxxxxxxxx 7656119yyyyyyyyyy
 EOF
   fi
@@ -660,16 +905,23 @@ EOF
 usage() {
   cat <<'EOF'
 valheimctl [flags] COMMAND ...        (backend: docker | podman | k8s - see README)
-  list | status NN | check | logs NN [-f] | backup NN | restart NN | rm NN | pull
-  init                          create the config layout + fleet.env template
-  adopt NN                      (docker/podman) write config for an already-running container, no change to it
-  import NN FILE.tgz            put an existing world (from `backup`) into this backend before first start
-  new NN SUFFIX [SEED]          stand up a new world
+  list [--json] | status NN | check | logs NN [-f] | rm NN | pull
+  init                          create the config layout and a fleet.env template
+  adopt NN [CONTAINER]          (docker/podman) write config for an already-running container, no change to it
+  new NN SUFFIX [SEED]          stand up a new world (NN is 1-9)
   set NN KEY=val ...            change per-world config, then apply (KEY= removes an override)
   apply NN | apply --all        guarded (re)deploy from config
+  start NN | stop NN            start / stop a world's container or pod (data kept)
+  services NN [--json]          the container's service table (supervisord)
+  service NN valheim-server start|stop|restart  |  service NN valheim-backup|valheim-updater run
+  restart NN                    restart only the game process
+  backup NN                     tar the world into the backup directory
+  backups list NN [--json]      list restore points (game auto-backups, image zips, snapshots, parked worlds)
+  restore NN ID                 roll a world back to a listed restore point (stop, snapshot, park, copy, start, verify)
+  import NN FILE.tgz            put an existing world (from `backup`) into this backend before first start
   passwd <NN|default> <server|supervisor>
-flags: -n/--dry-run  -y/--yes  --force  --new-world  --pull  --no-apply
-env:   VALHEIMCTL_BACKEND, VALHEIMCTL_ETC, VALHEIMCTL_DATA, VALHEIMCTL_KUBE_CONTEXT, VALHEIMCTL_DOCKER, VALHEIMCTL_KUBECTL
+flags: -n/--dry-run  -y/--yes  --force  --new-world  --pull  --no-apply  --json
+env:   VALHEIMCTL_BACKEND, VALHEIMCTL_HOME, VALHEIMCTL_ETC, VALHEIMCTL_DATA, VALHEIMCTL_KUBE_CONTEXT, VALHEIMCTL_DOCKER, VALHEIMCTL_KUBECTL
 EOF
 }
 
@@ -678,7 +930,7 @@ main() {
   for a in "$@"; do
     case $a in
       -n|--dry-run) DRY=1;; -y|--yes) YES=1;; --force) FORCE=1;; --new-world) NEWWORLD=1;;
-      --pull) PULL=1;; --no-apply) NOAPPLY=1;; --all) ALL=1;; -h|--help) usage; exit 0;;
+      --pull) PULL=1;; --no-apply) NOAPPLY=1;; --all) ALL=1;; --json) JSON=1;; -h|--help) usage; exit 0;;
       *) pos+=("$a");;
     esac
   done
@@ -688,7 +940,9 @@ main() {
   case $cmd in
     apply) if ((ALL)); then each_world cmd_apply; else cmd_apply "${1:-}"; fi;;
     list) cmd_list;; status) cmd_status "$@";; check) cmd_check;; logs) cmd_logs "$@";;
-    backup) cmd_backup "$@";; restart) cmd_restart "$@";; rm) cmd_rm "$@";; pull) cmd_pull;;
+    backup) cmd_backup "$@";; backups) cmd_backups "$@";; restore) cmd_restore "$@";;
+    services) cmd_services "$@";; service) cmd_service "$@";; start) cmd_start "$@";; stop) cmd_stop "$@";;
+    restart) cmd_restart "$@";; rm) cmd_rm "$@";; pull) cmd_pull;;
     init) cmd_init;; adopt) cmd_adopt "$@";; import) cmd_import "$@";; new) cmd_new "$@";; set) cmd_set "$@";; passwd) cmd_passwd "$@";;
     *) usage; exit 1;;
   esac

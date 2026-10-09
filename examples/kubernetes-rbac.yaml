@@ -1,0 +1,57 @@
+# Copyright (C) 2026 Chris Fettig
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The namespaced access valheimctl needs on Kubernetes (BACKEND=k8s). Apply as a cluster administrator, after editing the
+# namespace name. valheimctl uses only these permissions, in only this namespace: it never touches cluster-scoped objects,
+# and it never creates the namespace (create it yourself first).
+#
+#   kubectl create namespace valheim
+#   kubectl apply -f kubernetes-rbac.yaml
+#
+# Then give valheimctl a kubeconfig/token for the ServiceAccount below (how you issue it is up to your cluster policy).
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: valheimctl, namespace: valheim}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: valheimctl, namespace: valheim}
+rules:
+# World storage and the password Secret (apply, import, backup, restore). valheimctl never deletes PVCs or Secrets.
+- apiGroups: [""]
+  resources: [persistentvolumeclaims]
+  verbs: [get, list, create, patch]
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [get, create, patch]
+# Game Service; `rm` deletes it.
+- apiGroups: [""]
+  resources: [services]
+  verbs: [get, list, create, patch, delete]
+# Pods: look up the running pod, short-lived helper pod for import/restore/backup while a world is stopped, wait for readiness.
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, list, watch, create, delete]
+- apiGroups: [""]
+  resources: [pods/exec]          # status file, supervisorctl, backup/restore scripts, import
+  verbs: [create]
+- apiGroups: [""]
+  resources: [pods/log]           # logs, "server is up" and "save number" checks
+  verbs: [get]
+# The world workload; stop/start use `kubectl scale`, which needs the scale subresource.
+- apiGroups: [apps]
+  resources: [deployments]
+  verbs: [get, list, watch, create, patch, delete]
+- apiGroups: [apps]
+  resources: [deployments/scale]
+  verbs: [get, patch, update]
+# OPTIONAL: memory column of `valheimctl list` (needs metrics-server). Without it the column is simply empty.
+- apiGroups: [metrics.k8s.io]
+  resources: [pods]
+  verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: valheimctl, namespace: valheim}
+subjects: [{kind: ServiceAccount, name: valheimctl, namespace: valheim}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: valheimctl}

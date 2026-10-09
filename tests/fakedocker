@@ -2,29 +2,41 @@
 # Copyright (C) 2026 Chris Fettig
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Minimal docker stub for tests: stores containers as env files under $FAKE_STATE.
-S=${FAKE_STATE:?}; mkdir -p "$S"
+S=${FAKE_STATE:?}; mkdir -p "$S"; echo "docker $*" >>"$S/calls.log"
 cmd=$1; shift
 case $cmd in
   inspect)
     name=; fmt=
     while [[ $# -gt 0 ]]; do case $1 in -f|--format) fmt=$2; shift 2;; *) name=$1; shift;; esac; done
-    [[ -f $S/$name.env ]] || exit 1
+    [[ -f $S/$name.env ]] || { [[ -n $fmt ]] && echo; exit 1; }
     case $fmt in
-      *Config.Labels*) echo "valheimctl.secrets=$(cat "$S/$name.label" 2>/dev/null)";;
+      *Config.Labels*) key=secrets; [[ $fmt == *valheimctl.ports* ]] && key=ports; echo "valheimctl.$key=$(cat "$S/$name.label.$key" 2>/dev/null)";;
       *Config.Env*) cat "$S/$name.env";;
-      *State.Running*) echo true;; *State.Status*StartedAt*) echo "running since now";; *State.Status*) echo running;;
+      *State.Running*) [[ -e $S/$name.stopped ]] && echo false || echo true;;
+      *State.Status*StartedAt*) echo "running since now";; *State.Status*) echo running;;
       *) echo '{}';;
     esac;;
   run)
     name=; : >"$S/.tmp"
+    for a in "$@"; do [[ $prev == --name ]] && name=$a; prev=$a; done; : >"$S/$name.args"; name=; prev=
     while [[ $# -gt 0 ]]; do case $1 in --name) name=$2; shift 2;; -e) echo "$2" >>"$S/.tmp"; shift 2;;
-      --label) echo "${2#valheimctl.secrets=}" >"$S/$name.label"; shift 2;;
+      --label) k=${2%%=*}; echo "${2#*=}" >"$S/$name.label.${k#valheimctl.}"; echo "label $k=${2#*=}" >>"$S/$name.args"; shift 2;;
       -p|-v|--restart|--cap-add|--log-opt) echo "$1 $2" >>"$S/$name.args" 2>/dev/null; shift 2;; -d) shift;; *) shift;; esac; done
-    mv "$S/.tmp" "$S/$name.env"; echo fakeid;;
-  stop) :;; rm) rm -f "$S/$1.env" "$S/$1.label";;
-  logs) echo "01:00:00: Game server connected";;
-  exec) echo "exec $*" >>"$S/exec.log";;
+    mv "$S/.tmp" "$S/$name.env"; rm -f "$S/$name.stopped"; echo fakeid;;
+  stop) n=${!#}; touch "$S/$n.stopped"; echo "stopped $n" >>"$S/events.log";;
+  start) n=${!#}; rm -f "$S/$n.stopped"; echo "started $n" >>"$S/events.log";;
+  rm) rm -f "$S/$1.env" "$S/$1".label.* "$S/$1.stopped";;
+  logs) while [[ $# -gt 0 ]]; do case $1 in --since) shift 2;; *) shift;; esac; done
+        echo "Game server connected"; echo "ZNet.LoadWorld: X (w), save number ${FAKE_SAVE:-1000}";;
+  exec) shift; X="$*"
+        case $X in
+          *status.json*) echo "{\"player_count\": ${FAKE_PLAYERS:-0}, \"players\": []}";;
+          "supervisorctl status"*) printf 'valheim-bootstrap   EXITED   Oct 02 01:24 AM\nvalheim-server      RUNNING   pid 22, uptime 8:17:10\nvalheim-updater     RUNNING   pid 56, uptime 7 days, 12:03:02\n';;
+          *) echo "exec $X" >>"$S/exec.log";;
+        esac;;
   stats) for f in "$S"/*.env; do [[ -e $f ]] && echo "$(basename "$f" .env) 1.2GiB / 16GiB"; done;;
+  ps) for f in "$S"/*.env; do [[ -e $f ]] && basename "$f" .env; done;;
+  port) echo "2456/udp -> 0.0.0.0:2456";;
   pull) :;; image) echo sha256:fake;;
   *) echo "fakedocker: unsupported $cmd" >&2; exit 2;;
 esac
