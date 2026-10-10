@@ -41,7 +41,7 @@ From here on, run valheimctl from inside this directory (or any folder below it)
 sudo valheimctl menu
 ```
 The first time, the menu asks whether to create an instance here and walks you through it: where the worlds run (Docker, Podman or
-Kubernetes), a short name, and the password players will type to join. Then press **A** to add a world: pick a slot, give it a name, and confirm.
+Kubernetes) and a short name. Then press **A** to add a world: pick a slot, give it a name, choose **that world's** join password, and confirm.
 See [menu.md](menu.md) for the keys.
 
 ### The command way
@@ -49,14 +49,15 @@ Create the instance in the current directory:
 ```bash
 sudo valheimctl init
 ```
-Set the password players type to join (you are asked for it; it is never shown):
-```bash
-sudo valheimctl passwd default server
-```
-Create the world. It shows what it will do and what it exposes, and asks you to confirm:
+Create the world. It asks for **this world's join password** (typed twice, never shown), shows what it will do and what it exposes, and asks you to
+confirm:
 ```bash
 sudo valheimctl new 1 FamilyWorld
 ```
+Every world has a password of its own, so you can give each one a different one. If you would rather share one password across worlds, create a
+shared default once (`sudo valheimctl passwd default server`); then `new` lets you press Enter to use it, and a world that has none of its own
+falls back to it.
+
 The first start downloads the game files, which can take several minutes. The command waits and tells you when the world is up.
 
 ## 5. Check it

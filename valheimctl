@@ -43,7 +43,7 @@ DEFAULT_IMAGE="lloesche/valheim-server:latest"
 KCTX="${VALHEIMCTL_KUBE_CONTEXT:-}"; KCFG=""
 STATUS_FILE=/opt/valheim/htdocs/status.json     # written by the image's status updater; read from inside the container
 
-DRY=0 YES=0 FORCE=0 NEWWORLD=0 PULL=0 NOAPPLY=0 ALL=0 JSON=0
+DRY=0 YES=0 FORCE=0 NEWWORLD=0 PULL=0 NOAPPLY=0 ALL=0 JSON=0 USEDEFAULT=0
 BACKEND=docker FAMILY=dk DOCKER=docker KUBECTL=kubectl BACKUPS=""
 declare -A CFG=()
 
@@ -162,7 +162,10 @@ plan() {
   load_env CFG "$ETC/fleet.env"
   [[ -f $ETC/worlds/$NN.env ]] || die "no $ETC/worlds/$NN.env (use 'valheimctl new $NN <suffix>' or 'valheimctl adopt $NN')"
   load_env CFG "$ETC/worlds/$NN.env"
-  local k
+  local k; local -A W=(); load_env W "$ETC/worlds/$NN.env"
+  for k in INSTANCE_ID PORT_BLOCK HONOR_ORIGINAL_PORTS BACKEND; do
+    [[ -z ${W[$k]+x} ]] || die "$k belongs to the whole instance, not to one world (found in worlds/$NN.env): set it with 'valheimctl fleet set $k=...'"
+  done
   for k in "${!CFG[@]}"; do check_key "$k"; done
 
   INSTANCE=${CFG[INSTANCE_ID]:-main}
@@ -658,6 +661,7 @@ cmd_set() {
   for kv in "$@"; do
     [[ $kv == *=* ]] || die "expected KEY=value, got '$kv'"
     k=${kv%%=*}; v=${kv#*=}; check_key "$k"
+    case $k in INSTANCE_ID|PORT_BLOCK|HONOR_ORIGINAL_PORTS|BACKEND) die "$k belongs to the whole instance, not to one world: use 'valheimctl fleet set $k=...'";; esac
     if [[ $k == SUFFIX && ${cur[SUFFIX]:-} != "$v" ]] && ((!NEWWORLD)) && ((!fresh)); then
       die "changing SUFFIX renames the world, which creates a NEW empty world. Pass --new-world if you really want that."
     fi
@@ -684,8 +688,22 @@ cmd_new() {
   NEWWORLD=1; cmd_apply "$NN"
   echo "Join: ${CFG[PUBLIC_HOST]:-<host>}:$GAME_PORT (UDP), world $WORLD. The password is in $ETC/secrets/ (not printed)."
 }
+# Every world has a join password of its own. A shared default password is only a convenience: it is used when a world has none.
+ensure_world_password() {
+  [[ -f $ETC/secrets/$NN.server.pass ]] && return 0
+  if [[ ! -f $ETC/secrets/default.server.pass ]]; then cmd_passwd "$NN" server; return; fi   # nothing to fall back on
+  [[ -t 0 ]] || return 0                                                                     # scripted run: use the shared default
+  local p1 p2
+  read -rs -p "Join password for world $NN (press Enter to use the shared default password): " p1; echo
+  [[ -n $p1 ]] || { info "world $NN will use the shared default password"; return 0; }
+  read -rs -p "Again: " p2; echo
+  [[ $p1 == "$p2" ]] || die "passwords do not match"
+  [[ ${#p1} -ge 5 ]] || die "password must be at least 5 characters (game requirement)"
+  printf '%s' "$p1" | put "$ETC/secrets/$NN.server.pass" 0600
+  info "wrote $ETC/secrets/$NN.server.pass"
+}
 plan_secrets_prompt() {
-  [[ -f $ETC/secrets/$NN.server.pass || -f $ETC/secrets/default.server.pass ]] || cmd_passwd "$NN" server
+  ensure_world_password
   local -A fl=(); load_env fl "$ETC/fleet.env"
   if [[ ${fl[PUBLISH_CONTROL]:-false} == true && ! -f $ETC/secrets/$NN.supervisor.pass && ! -f $ETC/secrets/default.supervisor.pass ]]; then
     cmd_passwd "$NN" supervisor
@@ -696,6 +714,13 @@ plan_secrets_prompt() {
 cmd_passwd() { # <NN|default> <server|supervisor>
   local who=${1:-} kind=${2:-}; [[ $kind == server || $kind == supervisor ]] || die "usage: valheimctl passwd <NN|default> <server|supervisor>"
   [[ $who == default ]] || { parse_nn "$who"; who=$NN; }
+  if ((USEDEFAULT)); then   # give a world back to the shared default password
+    [[ $who != default ]] || die "--use-default is for a world: valheimctl passwd NN $kind --use-default"
+    [[ -f $ETC/secrets/default.$kind.pass ]] || die "there is no shared default $kind password to fall back to (create one: valheimctl passwd default $kind)"
+    [[ -f $ETC/secrets/$who.$kind.pass ]] || { info "world $who already uses the shared default $kind password"; return 0; }
+    confirm "Remove world $who's own $kind password and use the shared default instead?" || die "aborted"
+    run rm -f "$ETC/secrets/$who.$kind.pass"; info "world $who now uses the shared default $kind password (applies on next 'apply')"; return 0
+  fi
   local p1 p2
   if [[ -t 0 ]]; then
     read -rs -p "New $kind password for $who: " p1; echo; read -rs -p "Again: " p2; echo
@@ -763,6 +788,7 @@ cmd_status() {
   echo "backend:   $BACKEND   instance: $INSTANCE   world: $WORLD   image: $IMAGE"
   echo "update:    ${CFG[UPDATE_CRON]:-$UPDATE_CRON_DERIVED} (container time, UTC unless TZ is set)"
   echo "join:      ${CFG[PUBLIC_HOST]:-<host>}:$GAME_PORT (UDP)"
+  echo "password:  $([[ -f $ETC/secrets/$NN.server.pass ]] && echo "this world's own" || echo "the shared default")"
   be status_extra
   exposure_summary
   echo "players:   $(be players)"
@@ -1063,8 +1089,9 @@ valheimctl [flags] COMMAND ...        (backend: docker | podman | k8s - see READ
   backups list NN [--json]      list restore points (game auto-backups, image zips, snapshots, parked worlds)
   restore NN ID                 roll a world back to a listed restore point (stop, snapshot, park, copy, start, verify)
   import NN FILE.tgz            put an existing world (from `backup`) into this backend before first start
-  passwd <NN|default> <server|supervisor>
-flags: -n/--dry-run  -y/--yes  --force  --new-world  --pull  --no-apply  --json
+  passwd <NN|default> <server|supervisor>   set a world's own password (or the optional shared default)
+  passwd NN server --use-default            give a world back to the shared default password
+flags: -n/--dry-run  -y/--yes  --force  --new-world  --pull  --no-apply  --use-default  --json
 env:   VALHEIMCTL_BACKEND, VALHEIMCTL_HOME, VALHEIMCTL_ETC, VALHEIMCTL_DATA, VALHEIMCTL_KUBE_CONTEXT, VALHEIMCTL_DOCKER, VALHEIMCTL_KUBECTL
 EOF
 }
@@ -1074,7 +1101,7 @@ main() {
   for a in "$@"; do
     case $a in
       -n|--dry-run) DRY=1;; -y|--yes) YES=1;; --force) FORCE=1;; --new-world) NEWWORLD=1;;
-      --pull) PULL=1;; --no-apply) NOAPPLY=1;; --all) ALL=1;; --json) JSON=1;; -h|--help) usage; exit 0;;
+      --pull) PULL=1;; --no-apply) NOAPPLY=1;; --use-default) USEDEFAULT=1;; --all) ALL=1;; --json) JSON=1;; -h|--help) usage; exit 0;;
       *) pos+=("$a");;
     esac
   done

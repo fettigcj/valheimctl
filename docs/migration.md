@@ -10,13 +10,17 @@ valheimctl backup 4
 It writes `valheim04-KidWorld-<UTC stamp>.tgz` into the instance's `backups/` directory. Copy that file to the machine where you run
 valheimctl for Kubernetes (worlds are tens of MB; for very large ones run valheimctl on a host that has kubectl and copy host to host).
 
-On the Kubernetes side, in the instance directory of the Kubernetes instance (its `fleet.env` already says `BACKEND=k8s` and has a default password),
+On the Kubernetes side, in the instance directory of the Kubernetes instance (its `fleet.env` already says `BACKEND=k8s`),
 create world 4 with the **same suffix** as the old world, and any per-world settings it had, without deploying yet:
 ```bash
 valheimctl set 4 SUFFIX=KidWorld --no-apply
 ```
 ```bash
 valheimctl set 4 SERVER_ARGS='-modifier raids none' --no-apply
+```
+Give the world its join password (or skip this to use a shared default, if you created one):
+```bash
+valheimctl passwd 4 server
 ```
 Bring the world in. This creates the volumes and the password Secret, unpacks the world, and leaves the deployment at zero replicas:
 ```bash

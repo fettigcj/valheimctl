@@ -33,6 +33,11 @@ printf 'dockpass1' >"$T/etc/secrets/default.server.pass"
 printf 'SUFFIX=X\nSTATUS_HTTP=true\n' >"$T/etc/worlds/09.env"
 tf "derived key rejected in a config file" "$V" status 9; has "$T/out" 'STATUS_HTTP is derived'
 rm -f "$T/etc/worlds/09.env"
+tf "set rejects a setting that belongs to the whole instance" "$V" -y set 4 PORT_BLOCK=2; has "$T/out" 'belongs to the whole instance'
+printf 'SUFFIX=X
+HONOR_ORIGINAL_PORTS=true
+' >"$T/etc/worlds/09.env"
+tf "a world file cannot carry instance-wide settings" "$V" status 9; has "$T/out" 'belongs to the whole instance'; rm -f "$T/etc/worlds/09.env"
 tf "world 10 rejected (nine worlds per instance)" "$V" new 10 Nope; has "$T/out" 'must be 1-9'
 tf "world 0 rejected" "$V" new 0 Nope
 
@@ -112,6 +117,11 @@ t "list" "$V" list; has "$T/out" 'valheim04-KidWorld +2040'; t "list --json" "$V
 
 echo "- remove a world (its data is kept)"
 t "create world 6 for the removal test" "$V" -y new 6 Temp
+[[ ! -e $T/etc/secrets/06.server.pass ]] && ok "a scripted new uses the shared default password" || bad "a scripted new uses the shared default password"
+t "status says which password a world uses" "$V" status 6; has "$T/out" 'password:  the shared default'
+echo "world6pw" | t "give world 6 a password of its own" "$V" passwd 6 server; [[ -f $T/etc/secrets/06.server.pass ]] && ok "its own password file exists" || bad "its own password file exists"
+t "status shows the world's own password" "$V" status 6; has "$T/out" "password:  this world's own"
+t "give world 6 back to the shared default" "$V" -y passwd 6 server --use-default; [[ ! -e $T/etc/secrets/06.server.pass ]] && ok "its own password file is gone" || bad "its own password file is gone"
 FAKE_PLAYERS=2 tf "remove refused with players online" "$V" -y remove 6; has "$T/out" '2 player'
 t "remove world 6" "$V" -y remove 6
 [[ ! -e $S/valheim-main-06.env ]] && ok "container removed" || bad "container removed"

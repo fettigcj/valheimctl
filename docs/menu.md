@@ -26,19 +26,21 @@ Run it from inside your instance directory, with `sudo` if your Docker needs it.
 
 **A world:** its state, then settings you change with Enter, then actions.
 * *Raids* and *Difficulty preset*: pick from a list; the menu writes the game arguments in the right order for you.
-* *Listed in the server list*, *Name shown to players*, *Admins*, *Extra game arguments* (advanced).
+* *Listed in the server list*, *Name shown to players*, *Join password* (this world's own, or back to the shared default), *Admins*,
+  *Extra game arguments* (advanced).
 * *Apply saved changes*: makes your saved settings live. **This restarts the world**, and it is refused while players are connected.
 * *Stop / Start the world*, *Restart the game only*.
 * *Backups and restore...*: every restore point with its time; Enter on one to roll the world back. The current world is snapshotted and parked, never deleted.
 
 **Add a world (`A`):** choose a free slot (each shows its ports), name the world, confirm. It starts immediately; the first start downloads the game, which
-can take several minutes while the screen shows progress. If no join password exists yet it asks for one first.
+can take several minutes while the screen shows progress. You choose **that world's own join password** (typed twice, hidden); if a shared default
+password exists you can instead pick "Use the shared default password".
 
 **Remove a world (`D`):** stops the world and stops managing it. **Nothing is deleted:** world data, backups and the settings file stay on disk
 (the settings are kept as `config/worlds/NN.env.removed-...`, rename it back to manage the world again).
 
 **Settings shared by every world (`F`):** port block, original ports (2456...), the address players use, whether worlds are listed publicly, admins,
-update-check hours, and the join password.
+update-check hours, and an optional shared default password for worlds that have none of their own.
 
 ## Good to know
 * Passwords are typed into hidden fields and passed to valheimctl on its input, never on a command line.

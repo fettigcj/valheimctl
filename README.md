@@ -80,12 +80,9 @@ Then either use the menu, which walks you through the first setup and lets you a
 ```bash
 sudo valheimctl menu
 ```
-or do the same with commands: create the instance, set the join password, and create a world.
+or do the same with commands: create the instance, then create a world (it asks you for that world's own join password).
 ```bash
 sudo valheimctl init
-```
-```bash
-sudo valheimctl passwd default server
 ```
 ```bash
 sudo valheimctl new 1 FamilyWorld

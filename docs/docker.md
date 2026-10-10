@@ -27,10 +27,8 @@ sudo valheimctl fleet set PORT_BLOCK=0
 ```bash
 sudo valheimctl fleet set ADMINLIST_IDS="7656119xxxxxxxxxx"
 ```
-Set the password players use (you are asked for it; one world can have its own later with `passwd 4 server`):
-```bash
-sudo valheimctl passwd default server
-```
+There is no password to set yet: each world gets **its own join password** when you create it (`valheimctl new` asks), and you can change it
+later with `valheimctl passwd 4 server`. A shared default (`valheimctl passwd default server`) is optional.
 `valheimctl fleet show` prints the settings file. `sudo` keeps your current directory, so it finds the same instance. Docker needs root or
 membership in the `docker` group. To run valheimctl from somewhere else (a cron job, a service), set `VALHEIMCTL_HOME=/srv/valheimctl-main`.
 ## New world

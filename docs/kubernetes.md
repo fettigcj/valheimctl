@@ -48,11 +48,8 @@ Choose how the game ports leave the cluster (see the network recipes below):
 ```bash
 valheimctl fleet set K8S_EXPOSE=loadbalancer
 ```
-Set the password players use (you are asked for it):
-```bash
-valheimctl passwd default server
-```
-Create a world (or bring an existing one in: [migration.md](migration.md)):
+Create a world (or bring an existing one in: [migration.md](migration.md)). `new` asks for **that world's own join password**; an optional shared
+default can be created with `valheimctl passwd default server`:
 ```bash
 valheimctl new 4 KidWorld
 ```

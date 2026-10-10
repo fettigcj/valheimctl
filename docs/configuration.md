@@ -37,10 +37,17 @@ The default is `validate` (verify every game file on every check). Setting it em
 memory churn when several worlds update on one host. `PUBLIC_TEST=true` appends the public-test branch options. Game settings go in `SERVER_ARGS`.
 
 ## Passwords
-`secrets/NN.server.pass` (else `secrets/default.server.pass`), mode 0600, created with `valheimctl passwd`. Minimum 5 characters (a game rule).
-With `PUBLISH_CONTROL=true` a supervisor password is needed too (`secrets/NN.supervisor.pass` / `default.supervisor.pass`). The game server is
-still started with the password as a process argument, so anyone who can list processes on the host or in the container can see it. Docker mounts
-the file; Kubernetes stores it in a Secret.
+**Each world has a join password of its own**: `secrets/NN.server.pass` (mode 0600), created when you `valheimctl new NN ...` (it asks) or later with
+`valheimctl passwd NN server`. An optional **shared default** `secrets/default.server.pass` (`valheimctl passwd default server`) is used only by worlds that
+have no password of their own, and `valheimctl passwd NN server --use-default` hands a world back to it. `valheimctl status NN` says which one a world
+uses. Minimum 5 characters (a game rule). With `PUBLISH_CONTROL=true` a supervisor password is needed too, with the same per-world / default rule
+(`NN.supervisor.pass`, `default.supervisor.pass`). The game server is still started with the password as a process argument, so anyone who can list
+processes on the host or in the container can see it. Docker mounts the file; Kubernetes stores it in a Secret per world.
+
+## What is per world and what belongs to the instance
+Every setting in `fleet.env` is a default that a world's own `NN.env` can override: game arguments, admins, name, listing, update hours, image, resource
+requests, exposure, and so on. **Four settings define the whole instance and cannot be set per world** (valheimctl refuses them in a world file):
+`INSTANCE_ID`, `PORT_BLOCK`, `HONOR_ORIGINAL_PORTS` and `BACKEND`. Passwords are per world as described above.
 
 ## Example: parents vanilla, kids easier
 ```

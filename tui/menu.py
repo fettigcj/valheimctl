@@ -474,17 +474,14 @@ class App:
             if kc is None:
                 return False
             extra = [["fleet", "set", "K8S_NAMESPACE=" + ns]] + ([["fleet", "set", "K8S_KUBECONFIG=" + kc]] if kc else [])
-        pw = self.ask_password("your worlds")
-        if pw is None:
-            return False
         steps = [(["init"], None), (["fleet", "set", "BACKEND=" + backend], None), (["fleet", "set", "INSTANCE_ID=" + name], None)]
-        steps += [(e, None) for e in extra] + [(["passwd", "default", "server"], pw + "\n")]
+        steps += [(e, None) for e in extra]
         for args, stdin_text in steps:
             rc, out = self.run.run(args, stdin_text)
             if rc != 0:
                 self.message("Setup stopped", ["valheimctl " + " ".join(args[:2]) + " failed:"] + out.strip().splitlines()[-6:])
                 return False
-        self.notice = "Instance created. Add your first world with A."
+        self.notice = "Instance created. Add your first world with A; you choose that world's join password then."
         return True
 
     # ---- main screen: the worlds
@@ -557,16 +554,6 @@ class App:
             self.message("Add a world", ["This instance already has nine worlds (the most one instance holds)."])
             return
         f = self.fleet()
-        if not (os.path.isfile(os.path.join(self.cfg, "secrets", "default.server.pass"))):
-            if not self.confirm("Join password", ["No join password is set yet.", "Set one now?"]):
-                return
-            pw = self.ask_password("your worlds")
-            if pw is None:
-                return
-            rc, out = self.run.run(["passwd", "default", "server"], pw + "\n")
-            if rc != 0:
-                self.message("Join password", out.strip().splitlines()[-5:])
-                return
         n = self.choose("Add a world: which slot?", [("World %d   UDP %d-%d" % (x, *world_ports(x, f.get("PORT_BLOCK", "0"), f.get("HONOR_ORIGINAL_PORTS") == "true")), x)
                                                       for x in free], free[0], note="Each slot has its own ports.")
         if n is None:
@@ -575,11 +562,30 @@ class App:
                         validate=lambda v: "" if SUFFIX_RE.match(v) else "Use letters, digits, underscore or hyphen only.")
         if not name:
             return
+        # the join password belongs to this world; a shared default password is only an optional shortcut
+        own_pw = None
+        if os.path.isfile(os.path.join(self.cfg, "secrets", "default.server.pass")):
+            how = self.choose("Join password for this world", [("Give this world its own password", "own"),
+                                                               ("Use the shared default password", "default")], "own")
+            if how is None:
+                return
+        else:
+            how = "own"
+        if how == "own":
+            own_pw = self.ask_password("this world")
+            if own_pw is None:
+                return
         g, q = world_ports(n, f.get("PORT_BLOCK", "0"), f.get("HONOR_ORIGINAL_PORTS") == "true")
         if not self.confirm("Create this world?", ["Slot %d, named valheim%02d-%s" % (n, n, name),
                                                    "Players join on UDP port %d (and %d)." % (g, q),
+                                                   "Join password: " + ("this world's own" if own_pw is not None else "the shared default"),
                                                    "It starts now; the first start downloads the game (several minutes)."]):
             return
+        if own_pw is not None:
+            rc, out = self.run.run(["passwd", str(n), "server"], own_pw + "\n")
+            if rc != 0:
+                self.message("Join password", out.strip().splitlines()[-5:])
+                return
         self.logged("Creating world %d" % n, ["new", str(n), name, "-y"])
 
     def remove_world(self, n):
@@ -641,6 +647,28 @@ class App:
                 load()
             return do
 
+        def change_password():
+            own = os.path.isfile(os.path.join(self.cfg, "secrets", "%02d.server.pass" % n))
+            has_default = os.path.isfile(os.path.join(self.cfg, "secrets", "default.server.pass"))
+            opts = [("Set a new password for this world", "own")]
+            if own and has_default:
+                opts.append(("Use the shared default password", "default"))
+            how = self.choose("Join password for world %d" % n, opts, "own")
+            if how is None:
+                return
+            if how == "own":
+                pw = self.ask_password("world %d" % n)
+                if pw is None:
+                    return
+                rc, out = self.run.run(["passwd", str(n), "server"], pw + "\n")
+            else:
+                rc, out = self.run.run(["passwd", str(n), "server", "--use-default", "-y"])
+            if rc != 0:
+                self.message("Join password", out.strip().splitlines()[-5:])
+            else:
+                self.pending.add(n)
+                self.notice = "Saved. Choose 'Apply saved changes' to make it live (the world restarts)."
+
         def apply_now():
             self.logged("Applying changes to world %d" % n, ["apply", str(n), "-y"])
             self.pending.discard(n)
@@ -664,6 +692,9 @@ class App:
                      "do": edit_choice("SERVER_PUBLIC", "Listed in the server list?", YES_NO)},
                     {"kind": "item", "label": "Name shown to players", "value": merged.get("SERVER_NAME", "(world name)"),
                      "do": edit_text("SERVER_NAME", "Name shown to players", "Name players see in the server list:")},
+                    {"kind": "item", "label": "Join password",
+                     "value": "this world's own" if os.path.isfile(os.path.join(self.cfg, "secrets", "%02d.server.pass" % n)) else "shared default",
+                     "do": change_password},
                     {"kind": "item", "label": "Admins (Steam IDs)", "value": merged.get("ADMINLIST_IDS", "(none)")[:40],
                      "do": edit_text("ADMINLIST_IDS", "Admins", "Steam IDs of admins, separated by spaces:",
                                      ("Find an ID at steamid.io.",))},
@@ -757,10 +788,15 @@ class App:
             return do
 
         def password():
-            pw = self.ask_password("your worlds")
+            if not self.confirm("Shared default password", [
+                    "Every world should have its own join password (set when you add",
+                    "a world, or on the world's screen). The shared default is only used",
+                    "by worlds that have none of their own.", "", "Set or change the shared default?"]):
+                return
+            pw = self.ask_password("worlds that have no password of their own")
             if pw is not None:
                 rc, out = self.run.run(["passwd", "default", "server"], pw + "\n")
-                self.message("Join password", ["Saved. It applies to each world the next time it is applied."] if rc == 0 else out.strip().splitlines()[-5:])
+                self.message("Shared default password", ["Saved. It applies to worlds without their own password, the next time each is applied."] if rc == 0 else out.strip().splitlines()[-5:])
 
         def items():
             f = self.fleet()
@@ -779,7 +815,7 @@ class App:
                  "do": text("ADMINLIST_IDS", "Admins", "Steam IDs of admins, separated by spaces:")},
                 {"kind": "item", "label": "Update-check hours (UTC)", "value": f.get("UPDATE_HOURS", "0,6,12,18"),
                  "do": text("UPDATE_HOURS", "Update-check hours", "Hours (0-23, UTC) separated by commas:", ("Each world checks at a staggered minute.",))},
-                {"kind": "item", "label": "Change the join password...", "do": password},
+                {"kind": "item", "label": "Shared default password (optional)...", "do": password},
                 {"kind": "blank"},
                 {"kind": "line", "label": "Instance: %s     Backend: %s     Folder: %s" % (f.get("INSTANCE_ID", "main"), f.get("BACKEND", "docker"), self.dir)},
                 {"kind": "item", "label": "Back", "do": lambda: "back"}]

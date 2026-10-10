@@ -103,14 +103,17 @@ def main():
         if not cond:
             failures.append(name)
 
-    def instance(with_config=True):
+    def instance(with_config=True, default_pw=True, own_pw=False):
         d = tempfile.mkdtemp(dir=tmp)
         if with_config:
             os.makedirs(os.path.join(d, "config", "worlds"))
             os.makedirs(os.path.join(d, "config", "secrets"))
             open(os.path.join(d, "config", "fleet.env"), "w").write("BACKEND=docker\nINSTANCE_ID=main\nPORT_BLOCK=0\n")
             open(os.path.join(d, "config", "worlds", "01.env"), "w").write("SUFFIX=Test\n")
-            open(os.path.join(d, "config", "secrets", "default.server.pass"), "w").write("secret1")
+            if default_pw:
+                open(os.path.join(d, "config", "secrets", "default.server.pass"), "w").write("secret1")
+            if own_pw:
+                open(os.path.join(d, "config", "secrets", "01.server.pass"), "w").write("ownpass1")
         return d
 
     print("- quit")
@@ -128,16 +131,42 @@ def main():
 
     print("- apply the saved change")
     log = os.path.join(tmp, "c.log")
-    # open world; change raids; move down to Apply (6 settings below raids: preset, listed, name, admins, extra, then Apply)
-    keys = [ENTER, ENTER, DOWN, ENTER] + [DOWN] * 6 + [ENTER, " ", ESC, "q"]
+    # open world; change raids; move down to Apply (7 items below raids: preset, listed, name, password, admins, extra, then Apply)
+    keys = [ENTER, ENTER, DOWN, ENTER] + [DOWN] * 7 + [ENTER, " ", ESC, "q"]
     st = drive(keys, instance(), fake, log)
     check("apply was run with -y", "CALL apply 1 -y" in calls(log), calls(log))
 
-    print("- add a world")
+    print("- add a world: its join password is its own")
     log = os.path.join(tmp, "d.log")
-    # a -> slot dialog (first free = 2) Enter -> name "Fam" Enter -> confirm y -> any key -> q
-    st = drive(["a", ENTER, "F", "a", "m", ENTER, "y", " ", "q"], instance(), fake, log)
-    check("new world 2 named Fam created non-interactively", "CALL new 2 Fam -y" in calls(log), calls(log))
+    # a -> slot (first free = 2) Enter -> name "Fam" Enter -> a shared default exists, so choose: "own" Enter ->
+    # password twice -> confirm y -> any key -> q
+    keys = ["a", ENTER, "F", "a", "m", ENTER, ENTER] + list("pw1234") + [ENTER] + list("pw1234") + [ENTER, "y", " ", "q"]
+    st = drive(keys, instance(), fake, log)
+    c = calls(log)
+    check("the world's own password was set on stdin", "CALL passwd 2 server" in c and "STDIN-LEN 6" in c, c)
+    check("then the world was created non-interactively", "CALL new 2 Fam -y" in c and c.index("CALL passwd 2 server") < c.index("CALL new 2 Fam -y"), c)
+    check("the password never appears on a command line", not any("pw1234" in x for x in c if x.startswith("CALL")), c)
+    log = os.path.join(tmp, "d2.log")
+    st = drive(["a", ENTER, "F", "a", "m", ENTER, DOWN, ENTER, "y", " ", "q"], instance(), fake, log)
+    c = calls(log)
+    check("choosing the shared default sets no password for the world", "CALL new 2 Fam -y" in c and not any(x.startswith("CALL passwd 2") for x in c), c)
+    log = os.path.join(tmp, "d3.log")
+    # no shared default exists: there is no choice to make, the world needs its own password straight away
+    keys = ["a", ENTER, "F", "a", "m", ENTER] + list("pw1234") + [ENTER] + list("pw1234") + [ENTER, "y", " ", "q"]
+    st = drive(keys, instance(default_pw=False), fake, log)
+    check("without a shared default the world's own password is required", "CALL passwd 2 server" in calls(log) and "CALL new 2 Fam -y" in calls(log), calls(log))
+
+    print("- change a world's join password")
+    log = os.path.join(tmp, "d4.log")
+    # open world; down to Join password (4 below Raids); Enter; only "set a new password" is offered; Enter; twice; q
+    keys = [ENTER] + [DOWN] * 4 + [ENTER, ENTER] + list("newpw12") + [ENTER] + list("newpw12") + [ENTER, ESC, "q"]
+    st = drive(keys, instance(), fake, log)
+    check("passwd 1 server with the new password on stdin", "CALL passwd 1 server" in calls(log) and "STDIN-LEN 7" in calls(log), calls(log))
+    log = os.path.join(tmp, "d5.log")
+    # a world that has its own password can go back to the shared default
+    keys = [ENTER] + [DOWN] * 4 + [ENTER, DOWN, ENTER, ESC, "q"]
+    st = drive(keys, instance(own_pw=True), fake, log)
+    check("a world can return to the shared default", "CALL passwd 1 server --use-default -y" in calls(log), calls(log))
 
     print("- remove a world")
     log = os.path.join(tmp, "e.log")
@@ -149,8 +178,8 @@ def main():
 
     print("- backups and restore")
     log = os.path.join(tmp, "f.log")
-    # open world; go down to "Backups and restore..." (the 10th item, 9 steps below Raids)
-    keys = [ENTER] + [DOWN] * 9 + [ENTER, ENTER, "y", " ", ESC, ESC, "q"]
+    # open world; go down to "Backups and restore..." (the 11th item, 10 steps below Raids)
+    keys = [ENTER] + [DOWN] * 10 + [ENTER, ENTER, "y", " ", ESC, ESC, "q"]
     st = drive(keys, instance(), fake, log)
     c = calls(log)
     check("backups list was read", "CALL backups list 1 --json" in c, c)
@@ -165,12 +194,12 @@ def main():
     print("- first-run setup in an empty directory")
     log = os.path.join(tmp, "h.log")
     d = instance(with_config=False)
-    # y create; backend Docker Enter; name Enter (main); password twice; any key not needed; q
-    keys = ["y", ENTER, ENTER] + list("secret1") + [ENTER] + list("secret1") + [ENTER, "q"]
+    # y create; backend Docker Enter; name Enter (main); q. No password is asked: a password belongs to a world.
+    keys = ["y", ENTER, ENTER, "q"]
     st = drive(keys, d, fake, log, wait=0.25)
     c = calls(log)
-    check("init, backend, name and password were set", all(x in c for x in ["CALL init", "CALL fleet set BACKEND=docker", "CALL fleet set INSTANCE_ID=main", "CALL passwd default server"]), c)
-    check("password travelled on stdin only (7 characters), never as an argument", "STDIN-LEN 7" in c and not any("secret1" in x for x in c if x.startswith("CALL")), c)
+    check("init, backend and name were set", all(x in c for x in ["CALL init", "CALL fleet set BACKEND=docker", "CALL fleet set INSTANCE_ID=main"]), c)
+    check("setup asked for no password", not any(x.startswith("CALL passwd") for x in c), c)
 
     print()
     print("ALL PASSED" if not failures else "FAILED: " + ", ".join(failures))

@@ -17,7 +17,9 @@
 | `backup NN` | Snapshot the world into the backup directory. |
 | `backups list NN [--json]` | List restore points: game auto-backups, image zips, snapshots and parked worlds, with UTC and local time. |
 | `restore NN ID` | Roll a world back to a listed restore point. See [backups.md](backups.md). |
-| `passwd NN\|default server\|supervisor` | Write a password file (prompts, or reads one line from stdin). Takes effect on the next `apply`, which notices the change. |
+| `passwd NN server` | Set **a world's own** join password (prompts twice, or reads one line from stdin). `new` does this for you. Takes effect on the next `apply`, which notices the change. |
+| `passwd NN server --use-default` | Give a world back to the shared default password (removes its own password file; asks first). |
+| `passwd default server` | Optional **shared default** password, used only by worlds that have none of their own. |
 | `list [--json]` | Table of worlds, state, players, memory. |
 | `status NN` | Details for one world: ports, join address, players and drift between config and what is deployed. |
 | `check` | Audit: unmanaged data dirs, duplicate ports, extra world directories, deployed-vs-configured world name, orphaned containers. |
