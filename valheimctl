@@ -73,7 +73,8 @@ DERIVED_VARS=" WORLD_NAME SERVER_PORT STATUS_HTTP STATUS_HTTP_PORT SUPERVISOR_HT
 # Tool-internal keys (not passed to the container). K8S_* only matter to the k8s backend.
 INTERNAL_VARS=" IMAGE UPDATE_HOURS SUFFIX SEED BACKEND INSTANCE_ID PORT_BLOCK HONOR_ORIGINAL_PORTS PUBLISH_STATUS PUBLISH_CONTROL
  PUBLIC_HOST DISPLAY_TZ LEGACY_CONTAINER K8S_NAMESPACE K8S_EXPOSE K8S_EXPOSE_WEB K8S_LB_IP
- K8S_NODE_SELECTOR K8S_STORAGE_CLASS K8S_CONFIG_SIZE K8S_DATA_SIZE K8S_MEM_REQUEST K8S_MEM_LIMIT
+ K8S_NODE_SELECTOR K8S_LB_CLASS K8S_SERVICE_ANNOTATIONS K8S_TRAFFIC_POLICY K8S_AFFINITY_PREFERRED
+ K8S_TOLERATION_SECONDS K8S_PRIORITY_CLASS K8S_STORAGE_CLASS K8S_CONFIG_SIZE K8S_DATA_SIZE K8S_MEM_REQUEST K8S_MEM_LIMIT
  K8S_CPU_REQUEST K8S_CPU_LIMIT K8S_PULL_POLICY "
 
 in_list()  { local nl=$'\n' l; l=" ${2//$nl/ } "; [[ $l == *" $1 "* ]]; }
@@ -402,11 +403,53 @@ k8_secret_apply() {
 }
 k8_secret_rv() { kc get secret "$C" -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || echo none; }
 
+# Validate the optional exposure / scheduling settings (checked before anything is rendered or applied).
+k8_options_check() {
+  local v=${CFG[K8S_TRAFFIC_POLICY]:-}; [[ -z $v || $v == Cluster || $v == Local ]] || die "K8S_TRAFFIC_POLICY must be Cluster or Local"
+  v=${CFG[K8S_TOLERATION_SECONDS]:-}; [[ -z $v || $v =~ ^[0-9]+$ ]] || die "K8S_TOLERATION_SECONDS must be a number of seconds"
+  v=${CFG[K8S_AFFINITY_PREFERRED]:-}; [[ -z $v || $v =~ ^[A-Za-z0-9._/-]+=[A-Za-z0-9._-]+$ ]] || die "K8S_AFFINITY_PREFERRED must be label=value"
+  v=${CFG[K8S_NODE_SELECTOR]:-}; [[ -z $v || $v =~ ^[A-Za-z0-9._/-]+=[A-Za-z0-9._-]*$ ]] || die "K8S_NODE_SELECTOR must be label=value"
+  v=${CFG[K8S_LB_CLASS]:-}; [[ -z $v || $v =~ ^[A-Za-z0-9._/-]+$ ]] || die "K8S_LB_CLASS must look like a class name (letters, digits . _ / -)"
+  v=${CFG[K8S_PRIORITY_CLASS]:-}; [[ -z $v || $v =~ ^[a-z0-9.-]+$ ]] || die "K8S_PRIORITY_CLASS must be a priority class name"
+  v=${CFG[K8S_SERVICE_ANNOTATIONS]:-}
+  if [[ -n $v ]]; then local pair; while IFS= read -r pair; do [[ -z $pair ]] && continue
+    [[ $pair =~ ^[A-Za-z0-9._/-]+=[^[:cntrl:]]*$ ]] || die "K8S_SERVICE_ANNOTATIONS must be key=value pairs separated by ';' (bad: '$pair')"; done <<<"${v//;/$'\n'}"; fi
+}
+# service_annotations : the game Service's annotations as "key: value" lines (K8S_LB_IP hint first, then the passthrough list)
+service_annotations() {
+  [[ -z ${CFG[K8S_LB_IP]:-} || ${CFG[K8S_EXPOSE]:-loadbalancer} != loadbalancer ]] || printf '%s: %s\n' "metallb.io/loadBalancerIPs" "$(ystr "${CFG[K8S_LB_IP]}")"
+  local v=${CFG[K8S_SERVICE_ANNOTATIONS]:-} pair
+  if [[ -n $v ]]; then while IFS= read -r pair; do [[ -z $pair ]] && continue; printf '%s: %s\n' "$(ystr "${pair%%=*}")" "$(ystr "${pair#*=}")"; done <<<"${v//;/$'\n'}"; fi
+}
+# exposure_summary : one block saying exactly what a world exposes, printed before anything is applied
+exposure_summary() {
+  if [[ $BACKEND != k8s ]]; then
+    echo "exposes:   UDP $GAME_PORT and $QUERY_PORT published on all host interfaces$([[ $PUB_STATUS == true ]] && echo "; status page TCP $STATUS_PORT")$([[ $PUB_CONTROL == true ]] && echo "; supervisor page TCP $CONTROL_PORT")"
+    return
+  fi
+  k8_options_check
+  local expose=${CFG[K8S_EXPOSE]:-loadbalancer} pol=${CFG[K8S_TRAFFIC_POLICY]:-cluster default}
+  case $expose in
+    loadbalancer) echo "exposes:   Service $C-game type=LoadBalancer class=${CFG[K8S_LB_CLASS]:-cluster default} ip=${CFG[K8S_LB_IP]:-assigned by the load balancer} udp $GAME_PORT,$QUERY_PORT externalTrafficPolicy=$pol";;
+    nodeport)     echo "exposes:   Service $C-game type=NodePort udp $GAME_PORT,$QUERY_PORT (node ports are chosen by the cluster, so they differ from the game ports) externalTrafficPolicy=$pol";;
+    hostport)     echo "exposes:   hostPort udp $GAME_PORT,$QUERY_PORT on the node that runs the pod (node selector: ${CFG[K8S_NODE_SELECTOR]:-none}); no Service";;
+    none)         echo "exposes:   nothing outside the cluster (K8S_EXPOSE=none); you provide the routing";;
+  esac
+  [[ -z ${CFG[K8S_SERVICE_ANNOTATIONS]:-} ]] || echo "           annotations: ${CFG[K8S_SERVICE_ANNOTATIONS]}"
+  local pl=""
+  [[ -z ${CFG[K8S_NODE_SELECTOR]:-} ]] || pl+=" nodeSelector=${CFG[K8S_NODE_SELECTOR]}"
+  [[ -z ${CFG[K8S_AFFINITY_PREFERRED]:-} ]] || pl+=" preferredNode=${CFG[K8S_AFFINITY_PREFERRED]}"
+  [[ -z ${CFG[K8S_TOLERATION_SECONDS]:-} ]] || pl+=" failoverAfter=${CFG[K8S_TOLERATION_SECONDS]}s"
+  [[ -z ${CFG[K8S_PRIORITY_CLASS]:-} ]] || pl+=" priorityClass=${CFG[K8S_PRIORITY_CLASS]}"
+  [[ -z $pl ]] || echo "placement:  $pl"
+}
+
 k8_manifest() { # $1 = secret resourceVersion (changes the pod template, so a password change restarts the world)
   local rv=${1:-none} e k v
   local expose=${CFG[K8S_EXPOSE]:-loadbalancer} webexp=${CFG[K8S_EXPOSE_WEB]:-none}
   local pull=${CFG[K8S_PULL_POLICY]:-IfNotPresent} sc=${CFG[K8S_STORAGE_CLASS]:-}
-  case $expose in loadbalancer|hostport|none) :;; *) die "K8S_EXPOSE must be loadbalancer, hostport or none";; esac
+  case $expose in loadbalancer|hostport|nodeport|none) :;; *) die "K8S_EXPOSE must be loadbalancer, hostport, nodeport or none";; esac
+  k8_options_check
   case $webexp in loadbalancer|none) :;; *) die "K8S_EXPOSE_WEB must be none or loadbalancer";; esac
   local status=0 sup=0; [[ $PUB_STATUS == true ]] && status=1; [[ $PUB_CONTROL == true ]] && sup=1
   local pvc
@@ -431,6 +474,19 @@ k8_manifest() { # $1 = secret resourceVersion (changes the pod template, so a pa
     [[ ${CFG[K8S_NODE_SELECTOR]} == *=* ]] || die "K8S_NODE_SELECTOR must be key=value"
     echo "      nodeSelector:"; echo "        $(ystr "${CFG[K8S_NODE_SELECTOR]%%=*}"): $(ystr "${CFG[K8S_NODE_SELECTOR]#*=}")"
   fi
+  if [[ -n ${CFG[K8S_AFFINITY_PREFERRED]:-} ]]; then
+    echo "      affinity:"; echo "        nodeAffinity:"; echo "          preferredDuringSchedulingIgnoredDuringExecution:"
+    echo "            - weight: 100"; echo "              preference:"; echo "                matchExpressions:"
+    echo "                  - key: $(ystr "${CFG[K8S_AFFINITY_PREFERRED]%%=*}")"; echo "                    operator: In"
+    echo "                    values: [$(ystr "${CFG[K8S_AFFINITY_PREFERRED]#*=}")]"
+  fi
+  if [[ -n ${CFG[K8S_TOLERATION_SECONDS]:-} ]]; then
+    local tk; echo "      tolerations:"
+    for tk in node.kubernetes.io/unreachable node.kubernetes.io/not-ready; do
+      echo "        - key: $tk"; echo "          operator: Exists"; echo "          effect: NoExecute"; echo "          tolerationSeconds: ${CFG[K8S_TOLERATION_SECONDS]}"
+    done
+  fi
+  [[ -z ${CFG[K8S_PRIORITY_CLASS]:-} ]] || echo "      priorityClassName: ${CFG[K8S_PRIORITY_CLASS]}"
   echo "      containers:"; echo "        - name: valheim"; echo "          image: $(ystr "$IMAGE")"; echo "          imagePullPolicy: $pull"
   echo "          securityContext:"; echo "            capabilities:"; echo "              add: [\"SYS_NICE\"]"
   echo "          env:"
@@ -457,12 +513,15 @@ k8_manifest() { # $1 = secret resourceVersion (changes the pod template, so a pa
   echo "        - name: config"; echo "          persistentVolumeClaim: {claimName: $C-config}"
   echo "        - name: data"; echo "          persistentVolumeClaim: {claimName: $C-data}"
   echo "        - name: secrets"; echo "          secret: {secretName: $C, defaultMode: 256}"
-  if [[ $expose == loadbalancer ]]; then
+  if [[ $expose == loadbalancer || $expose == nodeport ]]; then
+    local ann; ann=$(service_annotations)
     echo "---"; echo "apiVersion: v1"; echo "kind: Service"
     echo "metadata:"; echo "  name: $C-game"; echo "  namespace: $NS"; echo "  labels:"; ylabels "    "
-    if [[ -n ${CFG[K8S_LB_IP]:-} ]]; then echo "  annotations:"; echo "    metallb.io/loadBalancerIPs: $(ystr "${CFG[K8S_LB_IP]}")"; fi
-    echo "spec:"; echo "  type: LoadBalancer"
-    [[ -z ${CFG[K8S_LB_IP]:-} ]] || echo "  loadBalancerIP: $(ystr "${CFG[K8S_LB_IP]}")"
+    if [[ -n $ann ]]; then echo "  annotations:"; sed 's/^/    /' <<<"$ann"; fi
+    echo "spec:"; if [[ $expose == nodeport ]]; then echo "  type: NodePort"; else echo "  type: LoadBalancer"; fi
+    [[ -z ${CFG[K8S_TRAFFIC_POLICY]:-} ]] || echo "  externalTrafficPolicy: ${CFG[K8S_TRAFFIC_POLICY]}"
+    [[ $expose != loadbalancer || -z ${CFG[K8S_LB_CLASS]:-} ]] || echo "  loadBalancerClass: $(ystr "${CFG[K8S_LB_CLASS]}")"
+    [[ $expose != loadbalancer || -z ${CFG[K8S_LB_IP]:-} ]] || echo "  loadBalancerIP: $(ystr "${CFG[K8S_LB_IP]}")"
     echo "  selector:"; echo "    app.kubernetes.io/instance: $C"; echo "  ports:"
     echo "    - name: game"; echo "      protocol: UDP"; echo "      port: $GAME_PORT"; echo "      targetPort: game"
     echo "    - name: query"; echo "      protocol: UDP"; echo "      port: $QUERY_PORT"; echo "      targetPort: query"
@@ -558,6 +617,7 @@ cmd_apply() { # NN : the guarded recreate
     ((p == 0)) || die "$p player(s) connected to the adopted container ${CFG[LEGACY_CONTAINER]}; try later or pass --force"
   fi
   info "$C [$BACKEND] world=$WORLD game=udp/$GAME_PORT-$QUERY_PORT image=$IMAGE"
+  exposure_summary
   if ! be diff && ((!FORCE)) && be running; then info "no changes for $C; nothing to do"; return 0; fi
   confirm "Apply to $C now (restarts the world)?" || die "aborted"
   be backup
@@ -585,6 +645,7 @@ cmd_set() {
     fi
     if [[ -z $v ]]; then unset "cur[$k]"; else cur[$k]=$v; fi
   done
+  CFG=(); for k in "${!cur[@]}"; do CFG[$k]=${cur[$k]}; done; k8_options_check   # reject a bad value before it is saved
   local new; new=$(printf '%s\n' "# managed by valheimctl; edit with 'valheimctl set'" ; for k in $(printf '%s\n' "${!cur[@]}" | sort); do printf '%s=%s\n' "$k" "${cur[$k]}"; done)
   diff -u "$f" <(printf '%s\n' "$new") | tail -n +3 || true
   printf '%s\n' "$new" | put "$f" 0644
@@ -684,6 +745,7 @@ cmd_status() {
   echo "update:    ${CFG[UPDATE_CRON]:-$UPDATE_CRON_DERIVED} (container time, UTC unless TZ is set)"
   echo "join:      ${CFG[PUBLIC_HOST]:-<host>}:$GAME_PORT (UDP)"
   be status_extra
+  exposure_summary
   echo "players:   $(be players)"
   echo "last backup: $(ls -1t "$BACKUPS/$WORLD-"*.tgz 2>/dev/null | head -1 || true)"
   echo "-- config drift:"; if be exists; then be diff || true; else echo "(not deployed)"; fi
@@ -836,6 +898,7 @@ cmd_check() {
     [[ -e $f ]] || continue; n=$(basename "$f" .env)
     ( plan "$n" >/dev/null ) || { rc=1; continue; }
     plan "$n"
+    echo "world $n ($WORLD):"; exposure_summary | sed 's/^/  /'
     local pk; for pk in "$GAME_PORT" "$QUERY_PORT"; do
       [[ -z ${seen[$pk]:-} ]] || { warn "port $pk used by worlds ${seen[$pk]} and $n"; rc=1; }; seen[$pk]=$n
     done

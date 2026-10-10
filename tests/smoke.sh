@@ -131,6 +131,18 @@ t "k8s second apply is a no-op" "$V" -y apply 04; has "$T/out" 'nothing to do'
 FAKE_PLAYERS=3 tf "k8s set refuses with players online" "$V" -y set 04 K8S_EXPOSE=hostport; has "$T/out" '3 player'
 t "k8s set hostport" "$V" -y set 04 K8S_EXPOSE=hostport; has "$K/manifest.txt" 'hostPort: 2040'; hasnt "$K/manifest.txt" 'name: valheim-main-04-game'
 t "k8s publish status page" "$V" -y set 04 PUBLISH_STATUS=true; has "$K/manifest.txt" 'name: valheim-main-04-web'; has "$K/manifest.txt" 'port: 2045'
+tf "k8s rejects a bad traffic policy before saving" "$V" -y set 04 K8S_TRAFFIC_POLICY=Bogus; has "$T/out" 'K8S_TRAFFIC_POLICY must be'; hasnt "$T/ketc/worlds/04.env" 'Bogus'
+t "k8s exposure and placement knobs" "$V" -y set 04 K8S_EXPOSE=loadbalancer K8S_LB_CLASS=example.com/lb K8S_LB_IP=192.0.2.10 K8S_TRAFFIC_POLICY=Local "K8S_SERVICE_ANNOTATIONS=lb.example/pool=game;foo/bar=baz" K8S_AFFINITY_PREFERRED=zone=a K8S_TOLERATION_SECONDS=30 K8S_PRIORITY_CLASS=important
+has "$K/manifest.txt" 'loadBalancerClass: "example.com/lb"'; has "$K/manifest.txt" 'externalTrafficPolicy: Local'; has "$K/manifest.txt" 'loadBalancerIP: "192.0.2.10"'
+has "$K/manifest.txt" '"lb.example/pool": "game"'; has "$K/manifest.txt" '"foo/bar": "baz"'; has "$K/manifest.txt" 'metallb.io/loadBalancerIPs'
+has "$K/manifest.txt" 'preferredDuringSchedulingIgnoredDuringExecution'; has "$K/manifest.txt" 'values: \["a"\]'; has "$K/manifest.txt" 'tolerationSeconds: 30'; has "$K/manifest.txt" 'priorityClassName: important'
+t "apply -n prints exactly what is exposed" "$V" -n apply 04; has "$T/out" 'type=LoadBalancer class=example.com/lb ip=192.0.2.10 udp 2040,2041 externalTrafficPolicy=Local'; has "$T/out" 'failoverAfter=30s'
+t "check prints the exposure of each world" "$V" check; has "$T/out" 'type=LoadBalancer class=example.com/lb'
+t "nodeport mode" "$V" -y set 04 K8S_EXPOSE=nodeport; has "$K/manifest.txt" 'type: NodePort'; hasnt "$K/manifest.txt" 'loadBalancerClass|loadBalancerIP|nodePort:'
+t "nodeport summary says the ports differ" "$V" -n apply 04; has "$T/out" 'node ports are chosen by the cluster'
+t "none mode" "$V" -y set 04 K8S_EXPOSE=none; hasnt "$K/manifest.txt" 'name: valheim-main-04-game'; t "none summary" "$V" -n apply 04; has "$T/out" 'nothing outside the cluster'
+t "back to defaults" "$V" -y set 04 K8S_EXPOSE=loadbalancer K8S_LB_CLASS= K8S_LB_IP= K8S_TRAFFIC_POLICY= K8S_SERVICE_ANNOTATIONS= K8S_AFFINITY_PREFERRED= K8S_TOLERATION_SECONDS= K8S_PRIORITY_CLASS=
+hasnt "$K/manifest.txt" 'tolerations|affinity|priorityClassName|externalTrafficPolicy'
 echo "newpass9" | t "k8s passwd" "$V" passwd 04 server
 t "k8s apply notices the password change" "$V" -y apply 04; has "$T/out" 'password file\(s\) differ'
 t "k8s services" "$V" services 04; has "$T/out" 'RUNNING'

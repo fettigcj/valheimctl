@@ -15,7 +15,7 @@ valheimctl **does not work around missing access**: if a step is forbidden it st
 | A kubeconfig | For that account. `VALHEIMCTL_KUBE_CONTEXT` selects a context; `KUBECONFIG` works as usual. |
 | Storage | A default StorageClass, or one named with `K8S_STORAGE_CLASS`. Per world: `K8S_CONFIG_SIZE` (default 5Gi: the world and its backups) + `K8S_DATA_SIZE` (default 10Gi: the ~6 GB game install). ReadWriteOnce is enough. |
 | A way to reach the UDP ports | `K8S_EXPOSE=loadbalancer` (default) needs a LoadBalancer implementation (K3s ServiceLB, MetalLB, a cloud LB) that supports UDP. Alternatives: `hostport` (pin the pod with `K8S_NODE_SELECTOR`) or `none` (you provide your own routing). |
-| Resources | Default request per world 2Gi memory / 250m CPU (a world uses about 1.2-1.7 GB). Check quotas: ResourceQuota (requests, storage, number of LoadBalancer services, PVCs) and any LimitRange **default memory limit**: below about 3Gi the game server can be OOM-killed. `K8S_MEM_LIMIT` is unset by default. |
+| Resources | Default request per world 2Gi memory / 250m CPU (a world server process measured 1.4-1.9 GiB resident). Check quotas: ResourceQuota (requests, storage, number of LoadBalancer services, PVCs) and any LimitRange **default memory limit**: below about 3Gi the game server can be OOM-killed. `K8S_MEM_LIMIT` is unset by default. |
 | Egress | The nodes pull the image from its registry, and the game container downloads game updates from Steam. |
 
 ## Setup
@@ -48,15 +48,44 @@ be exposed for the safety checks.
 | Key | Default | Meaning |
 |---|---|---|
 | `K8S_NAMESPACE` | `valheim` | namespace for the instance's objects |
-| `K8S_EXPOSE` | `loadbalancer` | `loadbalancer`, `hostport` (container hostPort, no game Service) or `none` |
-| `K8S_LB_IP` | unset | fixed IP for the game Service (`loadBalancerIP` plus the MetalLB annotation) |
+| `K8S_EXPOSE` | `loadbalancer` | how the game ports leave the cluster: `loadbalancer`, `nodeport`, `hostport` (container hostPort, no Service) or `none` (you provide routing). See the recipes below |
+| `K8S_LB_CLASS` | unset | `loadBalancerClass` of the game Service: pick which load balancer serves it (for example to opt out of the built-in one) |
+| `K8S_LB_IP` | unset | fixed IP for the game Service (`loadBalancerIP`, plus the `metallb.io/loadBalancerIPs` annotation). `loadbalancer` mode only |
+| `K8S_SERVICE_ANNOTATIONS` | unset | free-form annotations for the game Service as `key=value;key2=value2` (address pool, shared-IP keys, ... differ per load balancer) |
+| `K8S_TRAFFIC_POLICY` | cluster default | `externalTrafficPolicy`: `Cluster` or `Local`. `Local` answers only on the node that runs the pod and keeps client IPs; `Cluster` answers on every node but hides client IPs |
 | `K8S_EXPOSE_WEB` | `none` | `loadbalancer` exposes the optional status/supervisor Service |
-| `K8S_NODE_SELECTOR` | unset | `key=value`; needed with `hostport` |
+| `K8S_NODE_SELECTOR` | unset | `label=value`; required node label (needed with `hostport`) |
+| `K8S_AFFINITY_PREFERRED` | unset | `label=value`; preferred (not required) node, so a world favors one node but can run on another |
+| `K8S_TOLERATION_SECONDS` | unset | seconds before a pod is evicted from a node that is down/unreachable (the cluster default is 300); lower = faster failover |
+| `K8S_PRIORITY_CLASS` | unset | `priorityClassName` for the pod |
 | `K8S_STORAGE_CLASS` | cluster default | |
 | `K8S_CONFIG_SIZE` / `K8S_DATA_SIZE` | 5Gi / 10Gi | PVC sizes |
 | `K8S_MEM_REQUEST` / `K8S_CPU_REQUEST` | 2Gi / 250m | scheduling requests |
 | `K8S_MEM_LIMIT` / `K8S_CPU_LIMIT` | unset | limits are off by default; a memory limit makes the kernel kill the game server when exceeded |
 | `K8S_PULL_POLICY` | `IfNotPresent` | `Always` re-checks the image tag whenever a pod starts |
+
+## Network recipes
+valheimctl assumes no particular network. It always publishes the two UDP ports of a world **port for port** (see [ports.md](ports.md)), and
+`valheimctl -n apply NN` / `status` / `check` print exactly what a world exposes (type, class, IP, ports, policy) before anything is applied.
+Addresses below are documentation placeholders (192.0.2.0/24).
+
+> **Unproven:** this project has not yet pushed game UDP end to end through any of these on a live cluster. Treat each recipe as a design
+> to verify with a test world (internal only, no public forward) before players use it. Worlds are best-effort, not highly available.
+
+| # | Recipe | Settings | What it exposes | Failure behavior |
+|---|---|---|---|---|
+| 1 | **Built-in service load balancer only** (for example K3s ServiceLB) | defaults (`K8S_EXPOSE=loadbalancer`) | UDP game and query ports on the **node IPs** | The address players use is a node IP: forward to one node and that node is a single point of failure. `K8S_TRAFFIC_POLICY=Local` answers only on the node running the pod. |
+| 2 | **MetalLB, layer 2, dedicated network** | `K8S_LB_CLASS` (if the cluster has more than one load balancer), `K8S_LB_IP=192.0.2.100`, optionally `K8S_SERVICE_ANNOTATIONS=metallb.io/address-pool=game`, `K8S_AFFINITY_PREFERRED`, `K8S_TOLERATION_SECONDS` | A fixed virtual IP per world on the network the speakers are attached to | The IP **floats** between nodes: a firewall rule targets one stable address. A failed node moves the IP after the load balancer notices and the pod reschedules (storage permitting). `Cluster` policy is the simple choice here. |
+| 3 | **MetalLB, BGP** | as 2, plus the BGP annotations/pools your router expects via `K8S_SERVICE_ANNOTATIONS` | A routed virtual IP | Convergence is as fast as your router; `Local` policy gives the best behavior (only nodes with the pod advertise). |
+| 4 | **hostPort pinned to a node** | `K8S_EXPOSE=hostport`, `K8S_NODE_SELECTOR=kubernetes.io/hostname=node-a` | The two UDP ports on **that node's IP** only; no Service | Simple and predictable; the world cannot move, and the node is a single point of failure. Two worlds cannot use the same host port on one node (the port scheme prevents that). |
+| 5 | **NodePort behind an external load balancer** | `K8S_EXPOSE=nodeport` | A Service of type NodePort; the cluster picks node ports (30000-32767 by default), **so they cannot equal the game ports** | Your external load balancer or router maps game port to node port; look up the assigned ports with `kubectl -n <ns> get svc <name>-game`. |
+| 6 | **None** (you supply routing: your own Service, ingress controller with UDP support, a service mesh, ...) | `K8S_EXPOSE=none` | Nothing outside the cluster | Entirely up to you. |
+
+Notes that apply to every recipe:
+* **Failover time.** A pod on a dead node is evicted after `K8S_TOLERATION_SECONDS` (cluster default 300 s); `K8S_AFFINITY_PREFERRED` lets a world favor one node without forbidding the others. A world with a node-local ReadWriteOnce volume cannot move at all; failover needs network-backed storage.
+* **One stable address.** Prefer a fixed address that does not depend on which node runs the pod (recipes 2 and 3) when a firewall rule or a DNS name points at it.
+* **Port-for-port.** The Service port equals the container port equals the game port, so a rule that forwards 2010/2011 needs no translation; `HONOR_ORIGINAL_PORTS=true` keeps 2456, 2466, ... for existing firewall rules.
+* **Sizing.** A world's server process measured 1.4-1.9 GiB resident; the default request is 2Gi. Limits are off by default; if the namespace has a default memory limit, keep it above about 3Gi.
 
 ## What `apply` does on Kubernetes
 1. Refuses if the world is not on the volume (a marker annotation on the config PVC, set on import or first successful start; it survives `rm`).
