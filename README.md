@@ -47,7 +47,7 @@ Details, the "honor original ports" option (2456, 2466, ...) and instance blocks
 | Podman | `BACKEND=podman` | [docs/podman.md](docs/podman.md) |
 | Kubernetes / K3s | `BACKEND=k8s` | [docs/kubernetes.md](docs/kubernetes.md) |
 
-More: [commands](docs/commands.md), [configuration](docs/configuration.md), [backups and restore](docs/backups.md),
+More: [requirements and permissions](docs/requirements.md), [commands](docs/commands.md), [configuration](docs/configuration.md), [backups and restore](docs/backups.md),
 [moving worlds between backends](docs/migration.md), [ports](docs/ports.md), [design and roadmap](docs/design.md).
 
 ## Safety rules built in
