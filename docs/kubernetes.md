@@ -19,12 +19,30 @@ valheimctl **does not work around missing access**: if a step is forbidden it st
 | Egress | The nodes pull the image from its registry, and the game container downloads game updates from Steam. |
 
 ## Setup
+Tell valheimctl where this instance keeps its config, backups and restore journal, and which backend to use:
 ```bash
-export VALHEIMCTL_HOME=$HOME/valheimctl          # config, backups and the restore journal for this instance
-valheimctl init                                   # fleet.env template
-$EDITOR $VALHEIMCTL_HOME/config/fleet.env         # BACKEND=k8s, ADMINLIST_IDS, K8S_NAMESPACE, ...
+export VALHEIMCTL_HOME=$HOME/valheimctl
+export VALHEIMCTL_BACKEND=k8s
+```
+Create the config:
+```bash
+valheimctl init
+```
+Point it at your namespace, and choose how the game ports are exposed (see the network recipes below):
+```bash
+valheimctl fleet set K8S_NAMESPACE=valheim
+valheimctl fleet set K8S_EXPOSE=loadbalancer
+```
+Set the password players use (you are asked for it):
+```bash
 valheimctl passwd default server
-valheimctl new 4 KidWorld                         # brand-new world; or bring an existing one in (docs/migration.md)
+```
+Create a world (or bring an existing one in: [migration.md](migration.md)):
+```bash
+valheimctl new 4 KidWorld
+```
+See what is running:
+```bash
 valheimctl list
 ```
 Config and password files stay on the machine running valheimctl; the cluster receives a Secret per world built from them. Snapshots go to

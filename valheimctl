@@ -944,6 +944,38 @@ cmd_pull() {
   echo "Existing containers keep the old image until you run: valheimctl apply --all --force"
 }
 
+# env_edit_text TEXT KEY VALUE : replace KEY's line in TEXT (or add it); an empty VALUE removes the line. Comments are kept.
+env_edit_text() {
+  local text=$1 key=$2 val=$3 line found=0 out=""
+  while IFS= read -r line; do
+    if [[ $line == "$key="* ]]; then found=1; [[ -z $val ]] || out+="$key=$val"$'\n'
+    else out+="$line"$'\n'; fi
+  done <<<"$text"
+  if ((!found)) && [[ -n $val ]]; then out+="$key=$val"$'\n'; fi
+  printf '%s' "${out%$'\n'}"
+}
+
+cmd_fleet() { # show | set KEY=value ... : read or change the settings shared by every world
+  local sub=${1:-}; shift || true; local f="$ETC/fleet.env"
+  [[ -f $f ]] || die "no $f yet; run: valheimctl init"
+  case $sub in
+    show) cat "$f";;
+    set)
+      [[ $# -gt 0 ]] || die "usage: valheimctl fleet set KEY=value [KEY=value ...]   (KEY= removes a setting)"
+      local text kv k v; text=$(cat "$f")
+      for kv in "$@"; do
+        [[ $kv == *=* ]] || die "expected KEY=value, got '$kv'"
+        k=${kv%%=*}; v=${kv#*=}; check_key "$k"
+        case $k in SUFFIX|SEED|LEGACY_CONTAINER) die "$k belongs to a single world: use 'valheimctl set NN $k=...'";; esac
+        text=$(env_edit_text "$text" "$k" "$v")
+      done
+      diff -u "$f" <(printf '%s\n' "$text") | tail -n +3 || true
+      printf '%s\n' "$text" | put "$f" 0644
+      info "saved. Worlds that are already running pick this up at their next 'valheimctl apply NN' (or 'apply --all')";;
+    *) die "usage: valheimctl fleet show | valheimctl fleet set KEY=value ...";;
+  esac
+}
+
 cmd_init() {
   run mkdir -p "$ETC/worlds" "$ETC/secrets"; run chmod 0700 "$ETC/secrets"
   [[ $BACKEND == k8s ]] || run mkdir -p "$BACKUPS"
@@ -970,6 +1002,7 @@ usage() {
 valheimctl [flags] COMMAND ...        (backend: docker | podman | k8s - see README)
   list [--json] | status NN | check | logs NN [-f] | rm NN | pull
   init                          create the config layout and a fleet.env template
+  fleet show | fleet set KEY=val ...   read or change the settings shared by every world (instance name, port block, ...)
   adopt NN [CONTAINER]          (docker/podman) write config for an already-running container, no change to it
   new NN SUFFIX [SEED]          stand up a new world (NN is 1-9)
   set NN KEY=val ...            change per-world config, then apply (KEY= removes an override)
@@ -1006,7 +1039,7 @@ main() {
     backup) cmd_backup "$@";; backups) cmd_backups "$@";; restore) cmd_restore "$@";;
     services) cmd_services "$@";; service) cmd_service "$@";; start) cmd_start "$@";; stop) cmd_stop "$@";;
     restart) cmd_restart "$@";; rm) cmd_rm "$@";; pull) cmd_pull;;
-    init) cmd_init;; adopt) cmd_adopt "$@";; import) cmd_import "$@";; new) cmd_new "$@";; set) cmd_set "$@";; passwd) cmd_passwd "$@";;
+    fleet) cmd_fleet "$@";; init) cmd_init;; adopt) cmd_adopt "$@";; import) cmd_import "$@";; new) cmd_new "$@";; set) cmd_set "$@";; passwd) cmd_passwd "$@";;
     *) usage; exit 1;;
   esac
 }

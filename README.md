@@ -62,10 +62,26 @@ the save it was meant to, rolling back by itself otherwise. `rm` removes the con
 
 ## Quick start (Docker)
 ```bash
-sudo valheimctl init                        # creates /etc/valheim and a fleet.env template
-sudoedit /etc/valheim/fleet.env             # set ADMINLIST_IDS etc.
-sudo valheimctl new 1 FamilyWorld           # asks for a password, creates and starts valheim-main-01 on UDP 2010-2011
-sudo valheimctl set 1 SERVER_ARGS='-modifier raids none'    # per-world game args
+sudo valheimctl init
+```
+```bash
+# Settings shared by every world (here: who is an admin in game)
+sudo valheimctl fleet set ADMINLIST_IDS="7656119xxxxxxxxxx"
+```
+```bash
+# Set the password players use to join (you are asked for it; it is never shown)
+sudo valheimctl passwd default server
+```
+```bash
+# Create a world; it asks you to confirm, then starts it on UDP 2010-2011
+sudo valheimctl new 1 FamilyWorld
+```
+```bash
+# A setting for this one world only
+sudo valheimctl set 1 SERVER_ARGS='-modifier raids none'
+```
+```bash
+# See what is running, and the restore points for world 1
 valheimctl list
 valheimctl backups list 1
 ```

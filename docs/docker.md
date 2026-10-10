@@ -4,13 +4,30 @@ Each world runs as a container `valheim-<INSTANCE_ID>-NN` (default `valheim-main
 `VALHEIMCTL_DATA`, or `$VALHEIMCTL_HOME/worlds`, or `/home/valheimServers` by default.
 
 ## Setup
+The simplest way is to work in a root shell, so the commands stay short:
 ```bash
-export VALHEIMCTL_HOME=/srv/valheimctl/main      # optional: one directory for this instance's config, worlds and backups
-sudo -E valheimctl init
-sudoedit $VALHEIMCTL_HOME/config/fleet.env       # BACKEND=docker (default); ADMINLIST_IDS, UPDATE_HOURS ...
-sudo -E valheimctl passwd default server         # fleet-wide default password (one world can have its own: passwd 4 server)
+sudo -i
 ```
-Docker needs root or membership in the `docker` group. Without `VALHEIMCTL_HOME`, config is in `/etc/valheim` (root) or `~/.config/valheimctl`.
+Tell valheimctl where this instance keeps its config, worlds and backups (one directory; pick any path):
+```bash
+export VALHEIMCTL_HOME=/srv/valheimctl/main
+```
+Create the config:
+```bash
+valheimctl init
+```
+Change the settings shared by every world. Each line is optional; this example names the instance, picks its port block and sets the in-game admins:
+```bash
+valheimctl fleet set INSTANCE_ID=main
+valheimctl fleet set PORT_BLOCK=0
+valheimctl fleet set ADMINLIST_IDS="7656119xxxxxxxxxx"
+```
+Set the password players use (you are asked for it; one world can have its own later with `passwd 4 server`):
+```bash
+valheimctl passwd default server
+```
+`valheimctl fleet show` prints the file. Docker needs root or membership in the `docker` group. Without `VALHEIMCTL_HOME`, config is in
+`/etc/valheim` (root) or `~/.config/valheimctl`.
 
 ## New world
 `valheimctl new 5 Cabin`, then `valheimctl list`. Join at `<host>:2050` (UDP; the game port for world 5; query port 2051). Forward both UDP

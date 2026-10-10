@@ -20,6 +20,11 @@ WD="$T/data/valheim04/config"; WL="$WD/worlds_local"
 
 echo "- init and config validation"
 t init "$V" init; has "$T/etc/fleet.env" '^BACKEND=docker$'; has "$T/etc/fleet.env" '^INSTANCE_ID=main$'; has "$T/etc/fleet.env" '^HONOR_ORIGINAL_PORTS=false$'
+t "fleet set changes shared settings and keeps the comments" "$V" fleet set INSTANCE_ID=main UPDATE_HOURS=0,6,12,18 SERVER_PUBLIC=true; has "$T/etc/fleet.env" '^# Fleet-wide defaults'; has "$T/out" 'saved'
+tf "fleet set rejects an unknown key" "$V" fleet set NOT_A_KEY=1
+tf "fleet set refuses a per-world key" "$V" fleet set SUFFIX=x; has "$T/out" 'belongs to a single world'
+t "fleet set KEY= removes a setting" "$V" fleet set UPDATE_HOURS=; hasnt "$T/etc/fleet.env" '^UPDATE_HOURS='; t "fleet set restores it" "$V" fleet set UPDATE_HOURS=0,6,12,18
+t "fleet show" "$V" fleet show; has "$T/out" '^INSTANCE_ID=main'
 printf 'ADMINLIST_IDS=111 222\n' >>"$T/etc/fleet.env"
 printf 'dockpass1' >"$T/etc/secrets/default.server.pass"
 printf 'SUFFIX=X\nSTATUS_HTTP=true\n' >"$T/etc/worlds/09.env"
