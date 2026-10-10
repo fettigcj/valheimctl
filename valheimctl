@@ -32,7 +32,7 @@ resolve_locations() {
       d=$(dirname "$d")
     done
     if [[ -z $INST_HOME ]]; then
-      [[ $cmd == init ]] && INST_HOME=$PWD \
+      [[ $cmd == init || $cmd == menu ]] && INST_HOME=$PWD \
         || die "no valheimctl instance found in $PWD or any parent directory. Go to the directory you want to use and run: valheimctl init"
     fi
   fi
@@ -798,6 +798,29 @@ cmd_service() { # NN NAME ACTION : allowlisted actions on the container's progra
 }
 run_exec() { if ((DRY)); then printf '[dry-run] exec in %s:' "$C"; printf ' %q' "$@"; echo; else be exec "$@"; fi; }
 
+cmd_remove() { # NN : stop managing a world. Its data, volumes, backups and password files are NOT deleted.
+  plan "${1:-}"
+  info "Removing world $NN ($WORLD) from this instance: its container/deployment is removed; the world data, volumes, backups and password files stay."
+  if be exists && be running && ((!FORCE)); then
+    local p; p=$(be players); [[ -n $p ]] || die "cannot read the player count; pass --force if nobody is playing"
+    ((p == 0)) || die "$p player(s) connected; pass --force to remove the world anyway"
+  fi
+  confirm "Remove world $NN from management?" || die "aborted"
+  if be exists; then be remove; fi
+  local stamp; stamp=$(utc_stamp)
+  run mv "$ETC/worlds/$NN.env" "$ETC/worlds/$NN.env.removed-$stamp"
+  info "world $NN is no longer managed. Its settings were kept as worlds/$NN.env.removed-$stamp (rename it back to manage the world again)."
+  if [[ $BACKEND == k8s ]]; then echo "World data stays in the volumes $C-config and $C-data (namespace $NS)."; else echo "World data stays in $HOMEDIR."; fi
+}
+
+cmd_menu() { # a terminal menu (arrow keys) on top of the commands above; needs python3 with its built-in curses module
+  command -v python3 >/dev/null 2>&1 || die "the menu needs python3 (the rest of valheimctl does not)"
+  python3 -c 'import curses' 2>/dev/null || die "python3 has no curses module (Debian/Ubuntu: part of python3; macOS: included; Windows: use WSL)"
+  local self tui; self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}"); tui="$(dirname "$self")/tui/menu.py"
+  [[ -f $tui ]] || die "the menu files were not found next to valheimctl ($tui). Install by linking the script from a clone of the repository instead of copying it: sudo ln -s <clone>/valheimctl /usr/local/sbin/valheimctl"
+  VALHEIMCTL_BIN="$self" VALHEIMCTL_INSTANCE_DIR="${INST_HOME:-$(dirname "$ETC")}" exec python3 "$tui"
+}
+
 cmd_stop()  { plan "${1:-}"; be exists || die "$C is not deployed"
   if be running && ((!FORCE)); then local p; p=$(be players); [[ -n $p ]] || die "cannot read the player count; pass --force"; ((p == 0)) || die "$p player(s) connected; pass --force to stop anyway"; fi
   confirm "Stop $C (the world saves first)?" || die "aborted"; be stop_world; }
@@ -1031,6 +1054,8 @@ valheimctl [flags] COMMAND ...        (backend: docker | podman | k8s - see READ
   set NN KEY=val ...            change per-world config, then apply (KEY= removes an override)
   apply NN | apply --all        guarded (re)deploy from config
   start NN | stop NN            start / stop a world's container or pod (data kept)
+  remove NN                     stop managing a world (its data and backups stay on disk)
+  menu                          a terminal menu: arrow keys to browse worlds, edit settings, add and remove worlds (needs python3)
   services NN [--json]          the container's service table (supervisord)
   service NN valheim-server start|stop|restart  |  service NN valheim-backup|valheim-updater run
   restart NN                    restart only the game process
@@ -1061,7 +1086,7 @@ main() {
     apply) if ((ALL)); then each_world cmd_apply; else cmd_apply "${1:-}"; fi;;
     list) cmd_list;; status) cmd_status "$@";; check) cmd_check;; logs) cmd_logs "$@";;
     backup) cmd_backup "$@";; backups) cmd_backups "$@";; restore) cmd_restore "$@";;
-    services) cmd_services "$@";; service) cmd_service "$@";; start) cmd_start "$@";; stop) cmd_stop "$@";;
+    menu) cmd_menu;; remove) cmd_remove "$@";; services) cmd_services "$@";; service) cmd_service "$@";; start) cmd_start "$@";; stop) cmd_stop "$@";;
     restart) cmd_restart "$@";; rm) cmd_rm "$@";; pull) cmd_pull;;
     fleet) cmd_fleet "$@";; init) cmd_init;; adopt) cmd_adopt "$@";; import) cmd_import "$@";; new) cmd_new "$@";; set) cmd_set "$@";; passwd) cmd_passwd "$@";;
     *) usage; exit 1;;

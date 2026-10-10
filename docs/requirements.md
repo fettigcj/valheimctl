@@ -9,6 +9,7 @@ missing permission or asks for more than it uses. Share the relevant section wit
 | `tar`, `sed`, `awk`, `diff`, `mktemp`, GNU `date` | snapshots, config handling, local-time display (`date -d`) |
 | `unzip` | only to restore from the image's own zip backups (Docker/Podman: on the host; Kubernetes: the image already has it) |
 | Write access to the instance directory | `config/` (settings, password files with mode 0600, restore journal), `worlds/` (Docker/Podman world data), `backups/` (snapshots). The instance is the directory you run it from (or a parent that has `config/fleet.env`); `valheimctl init` creates it there |
+| `python3` (optional) | only for `valheimctl menu`; it uses Python's built-in `curses` module, so nothing is installed with pip. Not available on Windows Python: use WSL |
 | Nothing listening | valheimctl runs on demand; it opens no port and needs no inbound access |
 
 ## Docker

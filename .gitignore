@@ -2,3 +2,8 @@
 *.dll
 *.pass
 /tmp/
+
+# an instance created by running valheimctl inside a clone (keeps secrets and world data out of git)
+/config/
+/worlds/
+/backups/

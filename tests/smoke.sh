@@ -110,6 +110,14 @@ FAKE_SAVE=? t "restore from snapshot ($sid)" "$V" -y restore 04 "$sid"; ls "$WL/
 mkdir -p "$WL/oops"; tf "check flags an extra world directory" "$V" check; has "$T/out" "extra world 'oops'"; rmdir "$WL/oops"
 t "list" "$V" list; has "$T/out" 'valheim04-KidWorld +2040'; t "list --json" "$V" list --json; has "$T/out" '"world":"04"'
 
+echo "- remove a world (its data is kept)"
+t "create world 6 for the removal test" "$V" -y new 6 Temp
+FAKE_PLAYERS=2 tf "remove refused with players online" "$V" -y remove 6; has "$T/out" '2 player'
+t "remove world 6" "$V" -y remove 6
+[[ ! -e $S/valheim-main-06.env ]] && ok "container removed" || bad "container removed"
+[[ ! -e $T/etc/worlds/06.env ]] && ls "$T/etc/worlds"/06.env.removed-* >/dev/null 2>&1 && ok "settings kept under a .removed name" || bad "settings kept under a .removed name"
+[[ -d $T/data/valheim06 ]] && ok "world data directory still there" || bad "world data directory still there"
+t "the removed world is no longer listed" "$V" list; hasnt "$T/out" 'valheim06-Temp'
 echo "- podman uses the same path"
 ln -sf "$HERE/fakedocker" "$T/bin/podman"
 ( unset VALHEIMCTL_DOCKER; VALHEIMCTL_BACKEND=podman t "podman apply (force)" "$V" -y --force apply 04 ); has "$T/out" 'valheim-main-04 \[podman\]'

@@ -10,14 +10,21 @@ the image; the same OCI image runs unchanged on every backend.
 > **Status: draft.** Verified against stub `docker`/`kubectl` programs (`bash tests/smoke.sh`) and by parsing the generated Kubernetes
 > YAML. **Not yet run against a live engine or cluster.** Treat the first run as a trial, use `--dry-run`, and please report what you find.
 
+**New here? Start with [docs/getting-started.md](docs/getting-started.md).** It takes you from nothing to a running world, with either a
+terminal menu (`valheimctl menu`, arrow keys) or plain commands.
+
 ## Requirements
-bash >= 4.4, `tar`, `diff`, and the CLI of your backend: `docker`, `podman` or `kubectl`. Nothing else: no database, no reverse proxy, no
-Python (a future optional web interface is planned; see [docs/design.md](docs/design.md)).
+bash >= 4.4, `tar`, `diff`, and the CLI of your backend: `docker`, `podman` or `kubectl`. Nothing else: no database, no reverse proxy. The
+optional terminal menu also needs `python3`, using only the modules that ship with it. Details: [docs/requirements.md](docs/requirements.md).
 
 ## Install
+Download the project:
 ```bash
-git clone https://github.com/fettigcj/valheimctl
-sudo install -m 0755 valheimctl/valheimctl /usr/local/sbin/valheimctl     # or run it from the clone
+git clone https://github.com/fettigcj/valheimctl ~/valheimctl
+```
+Make the command available everywhere. Link it rather than copying it, because the menu needs the files that sit next to it:
+```bash
+sudo ln -s ~/valheimctl/valheimctl /usr/local/sbin/valheimctl
 ```
 
 ## How it works
@@ -48,7 +55,7 @@ Details, the "honor original ports" option (2456, 2466, ...) and instance blocks
 | Podman | `BACKEND=podman` | [docs/podman.md](docs/podman.md) |
 | Kubernetes / K3s | `BACKEND=k8s` | [docs/kubernetes.md](docs/kubernetes.md) |
 
-More: [requirements and permissions](docs/requirements.md), [commands](docs/commands.md), [configuration](docs/configuration.md), [backups and restore](docs/backups.md),
+More: [getting started](docs/getting-started.md), [the menu](docs/menu.md), [requirements and permissions](docs/requirements.md), [commands](docs/commands.md), [configuration](docs/configuration.md), [backups and restore](docs/backups.md),
 [moving worlds between backends](docs/migration.md), [ports](docs/ports.md), [design and roadmap](docs/design.md).
 
 ## Safety rules built in
@@ -61,35 +68,34 @@ More: [requirements and permissions](docs/requirements.md), [commands](docs/comm
 `restore` stops the world, snapshots it, parks it (never deletes it), copies the chosen backup in, starts it, and checks the server loaded
 the save it was meant to, rolling back by itself otherwise. `rm` removes the container or deployment only and never deletes world data.
 
-## Quick start (Docker)
+## Quick start
+An instance is a directory. Make one and stand in it:
+```bash
+sudo mkdir /srv/valheim
+```
+```bash
+cd /srv/valheim
+```
+Then either use the menu, which walks you through the first setup and lets you add worlds with a few key presses:
+```bash
+sudo valheimctl menu
+```
+or do the same with commands: create the instance, set the join password, and create a world.
 ```bash
 sudo valheimctl init
 ```
 ```bash
-# Settings shared by every world (here: who is an admin in game)
-sudo valheimctl fleet set ADMINLIST_IDS="7656119xxxxxxxxxx"
-```
-```bash
-# Set the password players use to join (you are asked for it; it is never shown)
 sudo valheimctl passwd default server
 ```
 ```bash
-# Create a world; it asks you to confirm, then starts it on UDP 2010-2011
 sudo valheimctl new 1 FamilyWorld
 ```
-```bash
-# A setting for this one world only
-sudo valheimctl set 1 SERVER_ARGS='-modifier raids none'
-```
-```bash
-# See what is running, and the restore points for world 1
-valheimctl list
-valheimctl backups list 1
-```
+The full walkthrough, including letting players in, is in [docs/getting-started.md](docs/getting-started.md).
 
 ## Development
 `bash tests/smoke.sh` runs the whole tool against stub `docker`/`kubectl` programs (no real engine needed); the backup listing and restore
-scripts run for real against temporary directories. Contributions that exercise a real Docker, Podman or cluster and report differences are
+scripts run for real against temporary directories. `python3 tests/test_menu.py` tests the menu's logic anywhere, and
+`python3 tests/pty_menu_test.py` drives the real menu through a terminal (Linux/macOS). Contributions that exercise a real Docker, Podman or cluster and report differences are
 the most useful thing right now.
 
 ## License

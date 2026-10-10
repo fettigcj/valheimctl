@@ -23,6 +23,9 @@
 | `check` | Audit: unmanaged data dirs, duplicate ports, extra world directories, deployed-vs-configured world name, orphaned containers. |
 | `logs NN [-f]` | Container/pod logs. |
 | `rm NN` | Remove the container/deployment. **World data is kept.** |
+| `remove NN` | Stop managing a world: removes its container/deployment and keeps its settings as `worlds/NN.env.removed-<stamp>`. World data, volumes, backups and password files are **not** deleted. Refused while players are connected unless `--force`. |
+| `menu` | A terminal menu (arrow keys): browse worlds, change settings, add and remove worlds, restore backups. Needs `python3`. See [menu.md](menu.md). |
+| `fleet show` / `fleet set KEY=value ...` | Show or change the settings shared by every world; keeps comments, shows a diff, refuses per-world keys. |
 | `pull` | Docker/Podman: pull the image and show before/after. Kubernetes: explains the pull policy. |
 
 Flags: `-n/--dry-run`, `-y/--yes` (no prompts), `--force` (skip the player/no-change checks), `--new-world`, `--pull` (Docker/Podman only),
