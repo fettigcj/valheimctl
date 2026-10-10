@@ -56,7 +56,7 @@ documentation tables and the web forms. Game arguments are composed in the right
 keys, then numeric flags. Steamcmd arguments are a small closed set (verify files on update, game branch, branch password), not free text.
 
 ## Multiple instances on one host [planned]
-Each instance has its own directory (`VALHEIMCTL_HOME`), `INSTANCE_ID` and `PORT_BLOCK`. Containers carry labels
+Each instance is its own directory (found like a git repository), with its own `INSTANCE_ID` and `PORT_BLOCK`. Containers carry labels
 `valheimctl.instance` and `valheimctl.world`, and an instance lists and manages only what it owns; it never runs an unfiltered
 `docker ps`. A host-level registry to reject overlapping port blocks is planned; until then pick distinct `PORT_BLOCK` values yourself and
 use `valheimctl check`. On Docker this is a visibility and safety boundary, not a security boundary (every instance can reach the same engine

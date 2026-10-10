@@ -25,6 +25,9 @@ tf "fleet set rejects an unknown key" "$V" fleet set NOT_A_KEY=1
 tf "fleet set refuses a per-world key" "$V" fleet set SUFFIX=x; has "$T/out" 'belongs to a single world'
 t "fleet set KEY= removes a setting" "$V" fleet set UPDATE_HOURS=; hasnt "$T/etc/fleet.env" '^UPDATE_HOURS='; t "fleet set restores it" "$V" fleet set UPDATE_HOURS=0,6,12,18
 t "fleet show" "$V" fleet show; has "$T/out" '^INSTANCE_ID=main'
+t "set creates a missing world config (no deploy)" "$V" set 8 SUFFIX=Fresh SERVER_ARGS="-modifier raids none" --no-apply; has "$T/etc/worlds/08.env" '^SUFFIX=Fresh'; has "$T/etc/worlds/08.env" 'raids none'
+tf "a new world config needs a SUFFIX" "$V" set 9 SERVER_ARGS=x --no-apply; has "$T/out" 'needs a SUFFIX'
+rm -f "$T/etc/worlds/08.env"
 printf 'ADMINLIST_IDS=111 222\n' >>"$T/etc/fleet.env"
 printf 'dockpass1' >"$T/etc/secrets/default.server.pass"
 printf 'SUFFIX=X\nSTATUS_HTTP=true\n' >"$T/etc/worlds/09.env"
@@ -163,5 +166,14 @@ t "k8s list" "$V" list; has "$T/out" 'valheim04-KidWorld'
 t "k8s check" "$V" check
 t "k8s rm" "$V" -y rm 04; [[ ! -e $K/deployed ]] && ok "deployment removed" || bad "deployment removed"
 t "k8s apply after rm needs no --new-world (the volume still has the world)" "$V" -y apply 04; [[ -e $K/deployed ]] && ok "deployment recreated" || bad "deployment recreated"
+t "kubeconfig is a fleet setting, not an environment variable" "$V" fleet set K8S_KUBECONFIG=/path/to/kc; : >"$K/calls.log"; t "list uses it" "$V" list; has "$K/calls.log" '--kubeconfig /path/to/kc'; t "setting removed" "$V" fleet set K8S_KUBECONFIG=
 tf "k8s --pull explained" "$V" -y --pull --force apply 04; has "$T/out" 'K8S_PULL_POLICY'
+echo "- instance discovery (a directory, found like a git repository; no environment variables)"
+D=$(mktemp -d); mkdir -p "$D/inst/sub"
+inst() { local dir=$1; shift; ( cd "$dir" && env -u VALHEIMCTL_ETC -u VALHEIMCTL_DATA -u VALHEIMCTL_HOME -u VALHEIMCTL_BACKEND -u VALHEIMCTL_BACKUPS "$V" "$@" ); }
+tf "outside any instance the error says what to do" inst "$D" fleet show; has "$T/out" 'run: valheimctl init'
+t "init creates the instance in the current directory" inst "$D/inst" init; [[ -f $D/inst/config/fleet.env && -d $D/inst/backups ]] && ok "config/ and backups/ created here" || bad "config/ and backups/ created here"
+t "a subdirectory finds the instance above it" inst "$D/inst/sub" fleet set INSTANCE_ID=subtest; has "$D/inst/config/fleet.env" '^INSTANCE_ID=subtest'
+t "VALHEIMCTL_HOME still overrides the search" env -u VALHEIMCTL_ETC -u VALHEIMCTL_DATA VALHEIMCTL_HOME="$D/inst" "$V" fleet show; has "$T/out" '^INSTANCE_ID=subtest'
+rm -rf "$D"
 echo; if ((fail)); then echo "FAILED"; exit 1; else echo "ALL PASSED"; fi

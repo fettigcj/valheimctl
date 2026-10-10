@@ -1,34 +1,38 @@
 # Docker
-Each world runs as a container `valheim-<INSTANCE_ID>-NN` (default `valheim-main-01` ... `-09`). World data lives on the host under
-`<data root>/valheimNN/{config,data}`. `config/` holds the world itself; `data/` is a re-downloadable ~6 GB game install. The data root is
-`VALHEIMCTL_DATA`, or `$VALHEIMCTL_HOME/worlds`, or `/home/valheimServers` by default.
+Each world runs as a container `valheim-<INSTANCE_ID>-NN` (default `valheim-main-01` ... `-09`). World data lives on the host in the instance
+directory, under `worlds/valheimNN/{config,data}`. `config/` holds the world itself; `data/` is a re-downloadable ~6 GB game install.
 
 ## Setup
-The simplest way is to work in a root shell, so the commands stay short:
+An **instance is a directory**. valheimctl finds it the way git finds a repository: it looks in the current directory, then in each parent
+directory, for `config/fleet.env`. So there is nothing to export: make a directory, go into it, and work from there.
+
+Make a directory for this instance and go into it (any path you like):
 ```bash
-sudo -i
+mkdir /srv/valheimctl-main
 ```
-Tell valheimctl where this instance keeps its config, worlds and backups (one directory; pick any path):
 ```bash
-export VALHEIMCTL_HOME=/srv/valheimctl/main
+cd /srv/valheimctl-main
 ```
-Create the config:
+Create the instance here (this makes `config/`, `worlds/` and `backups/` in the current directory):
 ```bash
-valheimctl init
+sudo valheimctl init
 ```
-Change the settings shared by every world. Each line is optional; this example names the instance, picks its port block and sets the in-game admins:
+Change the settings shared by every world. Each line is optional; these name the instance, pick its port block and set the in-game admins:
 ```bash
-valheimctl fleet set INSTANCE_ID=main
-valheimctl fleet set PORT_BLOCK=0
-valheimctl fleet set ADMINLIST_IDS="7656119xxxxxxxxxx"
+sudo valheimctl fleet set INSTANCE_ID=main
+```
+```bash
+sudo valheimctl fleet set PORT_BLOCK=0
+```
+```bash
+sudo valheimctl fleet set ADMINLIST_IDS="7656119xxxxxxxxxx"
 ```
 Set the password players use (you are asked for it; one world can have its own later with `passwd 4 server`):
 ```bash
-valheimctl passwd default server
+sudo valheimctl passwd default server
 ```
-`valheimctl fleet show` prints the file. Docker needs root or membership in the `docker` group. Without `VALHEIMCTL_HOME`, config is in
-`/etc/valheim` (root) or `~/.config/valheimctl`.
-
+`valheimctl fleet show` prints the settings file. `sudo` keeps your current directory, so it finds the same instance. Docker needs root or
+membership in the `docker` group. To run valheimctl from somewhere else (a cron job, a service), set `VALHEIMCTL_HOME=/srv/valheimctl-main`.
 ## New world
 `valheimctl new 5 Cabin`, then `valheimctl list`. Join at `<host>:2050` (UDP; the game port for world 5; query port 2051). Forward both UDP
 ports one-to-one. See [ports.md](ports.md).
@@ -43,10 +47,10 @@ valheimctl apply 1                # recreates the container once under the new n
 `adopt` expects the world name to be `valheimNN-<suffix>` and keeps it exactly. The old container is removed by that first `apply` (after
 the same player-count check, made against the old container). It records the old name as `LEGACY_CONTAINER`.
 If your worlds use 2456, 2466, ... set `HONOR_ORIGINAL_PORTS=true` in `fleet.env` before applying, or players' saved addresses will break.
-The world data directory must be `<data root>/valheimNN`; if it is elsewhere, point `VALHEIMCTL_DATA` at its parent.
+Worlds are expected in the instance's `worlds/valheimNN` directory; if your existing data is elsewhere (for example `/home/valheimServers/valheim01`), set `VALHEIMCTL_DATA` to its parent directory.
 
 ## What `apply` does
-Takes a snapshot of the world (UTC-stamped tarball in `<data root>/_backups`), then stops the container (60 s grace so the world saves),
+Takes a snapshot of the world (UTC-stamped tarball in the instance's `backups/` directory), then stops the container (60 s grace so the world saves),
 removes it, and runs a new one with the derived ports, mounts and environment. Ports are published one-to-one (`-p 2040:2040/udp`).
 Passwords are mounted read-only as files and passed through the image's `*_PASS_FILE` variables, so they do not appear in `docker inspect`.
 Labels record the instance, the world, the password files' mtimes and the published ports, so a changed password or port is noticed.

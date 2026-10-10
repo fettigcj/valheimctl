@@ -3,18 +3,32 @@ A world is just a directory (`config/worlds_local/<world>`), and the image is th
 archived on one side and imported on the other, with no conversion. `backup` produces the archive and `import` consumes it.
 
 ## Docker (or Podman) -> Kubernetes
-On the old host:
+On the old host, make a snapshot of the world. This is safe while it runs, and fine for a trial:
 ```bash
-valheimctl backup 4      # -> <backup dir>/valheim04-KidWorld-<UTC stamp>.tgz   (safe while running; fine for a trial)
+valheimctl backup 4
 ```
-Copy the `.tgz` to where you run valheimctl for Kubernetes (worlds are tens of MB; for very large ones run valheimctl on a host that has
-kubectl and copy host to host). Then:
+It writes `valheim04-KidWorld-<UTC stamp>.tgz` into the instance's `backups/` directory. Copy that file to the machine where you run
+valheimctl for Kubernetes (worlds are tens of MB; for very large ones run valheimctl on a host that has kubectl and copy host to host).
+
+On the Kubernetes side, in the instance directory of the Kubernetes instance (its `fleet.env` already says `BACKEND=k8s` and has a default password),
+create world 4 with the **same suffix** as the old world, and any per-world settings it had, without deploying yet:
 ```bash
-# fleet.env: BACKEND=k8s, a default password set, K8S_* chosen. worlds/04.env must name the SAME suffix:
-printf 'SUFFIX=KidWorld\nSERVER_ARGS=-modifier raids none\n' > $VALHEIMCTL_HOME/config/worlds/04.env
-valheimctl import 4 valheim04-KidWorld-<stamp>.tgz     # creates volumes + Secret, unpacks the world, the deployment stays at 0 replicas
-valheimctl -n apply 4                                  # review
-valheimctl apply 4                                     # starts it
+valheimctl set 4 SUFFIX=KidWorld --no-apply
+```
+```bash
+valheimctl set 4 SERVER_ARGS='-modifier raids none' --no-apply
+```
+Bring the world in. This creates the volumes and the password Secret, unpacks the world, and leaves the deployment at zero replicas:
+```bash
+valheimctl import 4 valheim04-KidWorld-<stamp>.tgz
+```
+Review what will be created and exposed (nothing is changed):
+```bash
+valheimctl -n apply 4
+```
+Start it:
+```bash
+valheimctl apply 4
 ```
 `import` refuses archives that hold anything other than that one world and refuses to overwrite a world that already exists.
 

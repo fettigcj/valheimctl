@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Minimal kubectl stub for tests: records calls, keeps deployment/secret state under $FAKE_K.
 K=${FAKE_K:?}; mkdir -p "$K"; echo "kubectl $*" >>"$K/calls.log"
-args=(); while [[ $# -gt 0 ]]; do case $1 in --context|-n) shift 2;; *) args+=("$1"); shift;; esac; done
+args=(); while [[ $# -gt 0 ]]; do case $1 in --context|-n|--kubeconfig) shift 2;; *) args+=("$1"); shift;; esac; done
 set -- "${args[@]}"; verb=$1; shift
 jp=; prev=; for a in "$@"; do [[ $a == jsonpath=* ]] && jp=$a; [[ $prev == -o && $a == jsonpath=* ]] && jp=$a; prev=$a; done
 rv() { cat "$K/rv" 2>/dev/null || echo 1; }

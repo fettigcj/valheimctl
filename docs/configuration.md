@@ -6,7 +6,7 @@ Derived keys (ports, `WORLD_NAME`, `SERVER_PORT`, the status/supervisor switches
 ## Tool keys
 | Key | Where | Meaning |
 |---|---|---|
-| `BACKEND` | fleet | `docker` (default), `podman`, `k8s`. `VALHEIMCTL_BACKEND` in the environment wins |
+| `BACKEND` | fleet | `docker` (default), `podman`, `k8s`. (`valheimctl fleet set BACKEND=k8s`; the `VALHEIMCTL_BACKEND` environment variable wins if set) |
 | `INSTANCE_ID` | fleet | name of this instance, `a-z 0-9 -`, up to 16 characters, default `main`; part of container/deployment names |
 | `PORT_BLOCK`, `HONOR_ORIGINAL_PORTS` | fleet | port layout, see [ports.md](ports.md) |
 | `PUBLISH_STATUS`, `PUBLISH_CONTROL` | fleet/world | publish the image's legacy status page / supervisor page (default false) |

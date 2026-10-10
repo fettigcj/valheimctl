@@ -19,18 +19,33 @@ valheimctl **does not work around missing access**: if a step is forbidden it st
 | Egress | The nodes pull the image from its registry, and the game container downloads game updates from Steam. |
 
 ## Setup
-Tell valheimctl where this instance keeps its config, backups and restore journal, and which backend to use:
+An **instance is a directory**. valheimctl finds it the way git finds a repository (the current directory, then each parent, looking for
+`config/fleet.env`), so there is nothing to export.
+
+Make a directory for this instance and go into it:
 ```bash
-export VALHEIMCTL_HOME=$HOME/valheimctl
-export VALHEIMCTL_BACKEND=k8s
+mkdir ~/valheimctl-k8s
 ```
-Create the config:
+```bash
+cd ~/valheimctl-k8s
+```
+Create the instance here:
 ```bash
 valheimctl init
 ```
-Point it at your namespace, and choose how the game ports are exposed (see the network recipes below):
+Use the Kubernetes backend:
+```bash
+valheimctl fleet set BACKEND=k8s
+```
+Name the credentials file this instance uses (a kubeconfig for the account described above) and the namespace it works in:
+```bash
+valheimctl fleet set K8S_KUBECONFIG=/path/to/kubeconfig
+```
 ```bash
 valheimctl fleet set K8S_NAMESPACE=valheim
+```
+Choose how the game ports leave the cluster (see the network recipes below):
+```bash
 valheimctl fleet set K8S_EXPOSE=loadbalancer
 ```
 Set the password players use (you are asked for it):
@@ -46,7 +61,8 @@ See what is running:
 valheimctl list
 ```
 Config and password files stay on the machine running valheimctl; the cluster receives a Secret per world built from them. Snapshots go to
-`<config dir>/backups` (override with `VALHEIMCTL_BACKUPS`).
+the instance's `backups/` directory. `K8S_KUBECONFIG` is optional: without it kubectl uses its usual `KUBECONFIG` / default file, and
+`K8S_CONTEXT` selects a context.
 
 ## What gets created (in the namespace)
 | Object | Name | Notes |
@@ -65,6 +81,8 @@ be exposed for the safety checks.
 ## Settings (in `fleet.env` or a world's `NN.env`; ignored by Docker/Podman)
 | Key | Default | Meaning |
 |---|---|---|
+| `K8S_KUBECONFIG` | kubectl default | path of the kubeconfig this instance uses (so credentials are named per instance, not taken from the environment) |
+| `K8S_CONTEXT` | current context | kubeconfig context to use |
 | `K8S_NAMESPACE` | `valheim` | namespace for the instance's objects |
 | `K8S_EXPOSE` | `loadbalancer` | how the game ports leave the cluster: `loadbalancer`, `nodeport`, `hostport` (container hostPort, no Service) or `none` (you provide routing). See the recipes below |
 | `K8S_LB_CLASS` | unset | `loadBalancerClass` of the game Service: pick which load balancer serves it (for example to opt out of the built-in one) |
@@ -112,7 +130,7 @@ Notes that apply to every recipe:
 3. Shows `kubectl diff` of the PVCs, Deployment and Services, plus a note if the password file differs from the cluster Secret (contents are
    never printed). Nothing changed means nothing happens.
 4. Snapshots the world from the pod to the local backup directory, applies the Secret then the manifests, and waits for "Game server connected".
-   The first start downloads the game files and can exceed the default 5-minute wait: raise `VALHEIMCTL_WAIT`, or watch `valheimctl logs NN -f`.
+   The first start downloads the game files and can take several minutes (the command waits up to 15 minutes and returns as soon as the world is up; `VALHEIMCTL_WAIT` changes that), or watch `valheimctl logs NN -f`.
 
 A password change updates the Secret and, because the Secret's version is stamped on the pod template, restarts the world.
 Stop and start use `kubectl scale`; restore scales the world to zero and uses a short-lived helper pod that mounts the config volume

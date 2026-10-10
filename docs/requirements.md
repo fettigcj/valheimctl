@@ -8,13 +8,13 @@ missing permission or asks for more than it uses. Share the relevant section wit
 | bash 4.4 or newer | the tool is one bash script |
 | `tar`, `sed`, `awk`, `diff`, `mktemp`, GNU `date` | snapshots, config handling, local-time display (`date -d`) |
 | `unzip` | only to restore from the image's own zip backups (Docker/Podman: on the host; Kubernetes: the image already has it) |
-| Write access to the instance directory | `config/` (settings, password files with mode 0600, restore journal), `worlds/` (Docker/Podman world data), `backups/` (snapshots). Default locations: `/etc/valheim` and `/home/valheimServers` as root, `~/.config/valheimctl` otherwise; `VALHEIMCTL_HOME=<dir>` keeps all of it in one directory |
+| Write access to the instance directory | `config/` (settings, password files with mode 0600, restore journal), `worlds/` (Docker/Podman world data), `backups/` (snapshots). The instance is the directory you run it from (or a parent that has `config/fleet.env`); `valheimctl init` creates it there |
 | Nothing listening | valheimctl runs on demand; it opens no port and needs no inbound access |
 
 ## Docker
 | Need | Details |
 |---|---|
-| Engine access | Run as root, or as a member of the `docker` group (that group is root-equivalent on the host). With `sudo`, pass the instance directory explicitly: `sudo VALHEIMCTL_HOME=/path valheimctl ...` |
+| Engine access | Run as root, or as a member of the `docker` group (that group is root-equivalent on the host). `sudo` keeps your current directory, so `sudo valheimctl ...` finds the same instance |
 | Free host ports | The instance's UDP ports (two per world, for example 2110-2111, 2120-2121, 2130-2131) must be free on the host and allowed by the host firewall. Forward them one-to-one on your router if players connect from outside |
 | Outbound network for containers | The container registry that hosts the image (or pre-pull it), and Steam for the game download and updates. The first start of each world downloads about 2 GB |
 | Capacity per world | about 2 GiB of RAM (the server process measured 1.4-1.9 GiB) and about 6 GB of disk for the game install plus the world and its backups |
@@ -48,4 +48,4 @@ daemon). A future optional web interface will list its own additional requiremen
 | `Error from server (Forbidden)` | one rule of the Kubernetes Role; the message names the resource and verb |
 | `namespaces "x" not found` | the namespace must be created first |
 | `cannot read the player count` | the world is not running yet (the check reads the status file inside the container); `--force` skips it when you know nobody is playing |
-| `Permission denied` writing under the instance directory | run as the user that owns it, or `sudo` with `VALHEIMCTL_HOME` |
+| `Permission denied` writing under the instance directory | run as the user that owns the instance directory, or use `sudo` from inside it |

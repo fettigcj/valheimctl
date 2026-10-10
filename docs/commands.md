@@ -28,6 +28,8 @@
 Flags: `-n/--dry-run`, `-y/--yes` (no prompts), `--force` (skip the player/no-change checks), `--new-world`, `--pull` (Docker/Podman only),
 `--no-apply` (with `set`), `--json`.
 
-Environment: `VALHEIMCTL_BACKEND`, `VALHEIMCTL_HOME` (one directory for config, worlds and backups), `VALHEIMCTL_ETC`, `VALHEIMCTL_DATA`
-(Docker/Podman world root), `VALHEIMCTL_KUBE_CONTEXT`, `VALHEIMCTL_DOCKER`, `VALHEIMCTL_KUBECTL`, `VALHEIMCTL_BACKUPS`, `VALHEIMCTL_BACKUP_KEEP`,
-`VALHEIMCTL_WAIT` (seconds to wait for a world to come up, default 300).
+Where the instance is: the current directory or the nearest parent with `config/fleet.env` (see the README). Normally no environment variable is needed.
+Optional overrides, for scripts and services: `VALHEIMCTL_HOME` (the instance directory), `VALHEIMCTL_ETC` / `VALHEIMCTL_DATA` (config and world data
+locations separately, for example existing data elsewhere), `VALHEIMCTL_BACKUPS`, `VALHEIMCTL_BACKUP_KEEP` (snapshots kept per world, default 10),
+`VALHEIMCTL_WAIT` (seconds to wait for a world to come up, default 900; it returns as soon as the world is up), `VALHEIMCTL_DOCKER` /
+`VALHEIMCTL_KUBECTL` (which engine program to run), `VALHEIMCTL_BACKEND` and `VALHEIMCTL_KUBE_CONTEXT` (the same as the `BACKEND` and `K8S_CONTEXT` settings).

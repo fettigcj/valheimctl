@@ -22,12 +22,13 @@ sudo install -m 0755 valheimctl/valheimctl /usr/local/sbin/valheimctl     # or r
 
 ## How it works
 ```
-<config dir>/fleet.env          settings shared by every world (backend, image, admins, update hours ...)
-<config dir>/worlds/NN.env      per-world settings: SUFFIX, SEED, SERVER_ARGS, overrides
-<config dir>/secrets/*.pass     passwords, one file each, mode 0600 (never in env files, never in the container env)
+config/fleet.env               settings shared by every world (backend, image, admins, update hours ...)
+config/worlds/NN.env           per-world settings: SUFFIX, SEED, SERVER_ARGS, overrides
+config/secrets/*.pass          passwords, one file each, mode 0600 (never in env files, never in the container env)
 ```
-`NN` is the world number, **1 to 9** (nine worlds per instance). Config goes in `/etc/valheim` (as root) or `~/.config/valheimctl`;
-`VALHEIMCTL_HOME=<dir>` keeps config, worlds and backups for one instance under a single directory.
+`NN` is the world number, **1 to 9** (nine worlds per instance). The three folders above, plus `worlds/` (the game data) and `backups/`, make up an
+**instance, which is simply a directory**: valheimctl finds it the way git finds a repository (the current directory, or the nearest parent that
+has `config/fleet.env`), and `valheimctl init` creates one in the current directory. Nothing needs to be exported or installed system-wide.
 Everything else is **derived from the world number**, so you never type a port:
 
 | What | Rule | Example (instance block 0) |
