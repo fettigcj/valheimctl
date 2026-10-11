@@ -154,6 +154,7 @@ rm -f "$K/calls.log"
 t "k8s apply -n shows the manifest, applies nothing" "$V" -n apply 04; has "$T/out" 'kind: Deployment'; hasnt "$K/calls.log" 'apply -f'
 t "k8s apply -y" "$V" -y apply 04
 hasnt "$K/calls.log" "get namespace|create namespace| namespaces?( |$)"; ok "no cluster-scoped namespace calls"
+has "$K/manifest.txt" 'automountServiceAccountToken: false'
 has "$K/manifest.txt" '^  replicas: 1$'; has "$K/manifest.txt" 'type: Recreate'; has "$K/manifest.txt" 'SYS_NICE'; has "$K/manifest.txt" 'name: valheim-main-04'
 has "$K/manifest.txt" 'name: SERVER_PORT'; has "$K/manifest.txt" 'value: "2040"'; has "$K/manifest.txt" 'containerPort: 2040'; has "$K/manifest.txt" 'containerPort: 2041'
 has "$K/manifest.txt" 'port: 2040'; has "$K/manifest.txt" 'port: 2041'; has "$K/manifest.txt" 'type: LoadBalancer'; has "$K/manifest.txt" 'valheimctl.io/instance: main'

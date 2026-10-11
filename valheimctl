@@ -515,6 +515,9 @@ k8_manifest() { # $1 = secret resourceVersion (changes the pod template, so a pa
   echo "  template:"; echo "    metadata:"; echo "      labels:"; ylabels "        "
   echo "      annotations:"; echo "        valheimctl.io/secret-version: $(ystr "$rv")"
   echo "    spec:"; echo "      terminationGracePeriodSeconds: 60"
+  # A game server has no use for a Kubernetes API token, and the automatic token mount (/var/run/secrets/kubernetes.io/...) would collide
+  # with the password Secret mounted at /run/secrets (the pod then fails to start with "read-only file system").
+  echo "      automountServiceAccountToken: false"
   if [[ -n ${CFG[K8S_NODE_SELECTOR]:-} ]]; then
     [[ ${CFG[K8S_NODE_SELECTOR]} == *=* ]] || die "K8S_NODE_SELECTOR must be key=value"
     echo "      nodeSelector:"; echo "        $(ystr "${CFG[K8S_NODE_SELECTOR]%%=*}"): $(ystr "${CFG[K8S_NODE_SELECTOR]#*=}")"
