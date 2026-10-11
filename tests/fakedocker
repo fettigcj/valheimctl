@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Minimal docker stub for tests: stores containers as env files under $FAKE_STATE.
 S=${FAKE_STATE:?}; mkdir -p "$S"; echo "docker $*" >>"$S/calls.log"
+if [[ ${FAKE_DOCKER_DENIED:-0} == 1 ]]; then echo "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock" >&2; exit 1; fi
 cmd=$1; shift
 case $cmd in
   inspect)
@@ -37,6 +38,7 @@ case $cmd in
   stats) for f in "$S"/*.env; do [[ -e $f ]] && echo "$(basename "$f" .env) 1.2GiB / 16GiB"; done;;
   ps) for f in "$S"/*.env; do [[ -e $f ]] && basename "$f" .env; done;;
   port) echo "2456/udp -> 0.0.0.0:2456";;
+  version) echo 27.0.0;;
   pull) :;; image) echo sha256:fake;;
   *) echo "fakedocker: unsupported $cmd" >&2; exit 2;;
 esac

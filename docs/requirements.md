@@ -15,7 +15,7 @@ missing permission or asks for more than it uses. Share the relevant section wit
 ## Docker
 | Need | Details |
 |---|---|
-| Engine access | Run as root, or as a member of the `docker` group (that group is root-equivalent on the host). `sudo` keeps your current directory, so `sudo valheimctl ...` finds the same instance |
+| Engine access | Run as root (`sudo`), or as a member of the `docker` group (`sudo usermod -aG docker $USER`, then log out and in; that group is root-equivalent on the host). `sudo` keeps your current directory, so `sudo valheimctl ...` finds the same instance. Use one way consistently: mixing them leaves root-owned files in the instance directory. valheimctl checks Docker access first and tells you what to do |
 | Free host ports | The instance's UDP ports (two per world, for example 2110-2111, 2120-2121, 2130-2131) must be free on the host and allowed by the host firewall. Forward them one-to-one on your router if players connect from outside |
 | Outbound network for containers | The container registry that hosts the image (or pre-pull it), and Steam for the game download and updates. The first start of each world downloads about 2 GB |
 | Capacity per world | about 2 GiB of RAM (the server process measured 1.4-1.9 GiB) and about 6 GB of disk for the game install plus the world and its backups |

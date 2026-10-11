@@ -127,7 +127,7 @@ load_env() {
 select_backend() {
   local -A fl=(); load_env fl "$ETC/fleet.env"
   BACKEND=${VALHEIMCTL_BACKEND:-${fl[BACKEND]:-docker}}
-  KCFG=${fl[K8S_KUBECONFIG]:-}; [[ -n $KCTX ]] || KCTX=${fl[K8S_CONTEXT]:-}
+  KCFG=${fl[K8S_KUBECONFIG]:-}; [[ -n $KCTX ]] || KCTX=${fl[K8S_CONTEXT]:-}; NS=${fl[K8S_NAMESPACE]:-valheim}
   case $BACKEND in
     docker) FAMILY=dk; DOCKER=${VALHEIMCTL_DOCKER:-docker};;
     podman) FAMILY=dk; DOCKER=${VALHEIMCTL_DOCKER:-podman};;
@@ -139,6 +139,22 @@ select_backend() {
   elif [[ $BACKEND == k8s ]]; then BACKUPS="$ETC/backups"; else BACKUPS="$DATA/_backups"; fi
 }
 be() { local op=$1; shift; "${FAMILY}_$op" "$@"; }   # dispatch to dk_<op> or k8_<op>
+
+# Fail early, and say how to fix it, when the container engine or the cluster cannot be used. Without this a permission problem
+# would look like "no containers" because individual calls hide their errors.
+require_engine() {
+  local out
+  if [[ $FAMILY == dk ]]; then
+    out=$("$DOCKER" version --format '{{.Server.Version}}' 2>&1) \
+      || die "cannot use $DOCKER: ${out##*$'\n'}
+  - If it says 'permission denied': run valheimctl with sudo, or let your user use Docker: sudo usermod -aG docker \$USER, then log out and in again (the docker group is root-equivalent on the host).
+  - If the program is missing or not running: install or start $DOCKER, or set BACKEND in the instance settings."
+  else
+    out=$(kc get deployments --limit=1 2>&1) \
+      || die "kubectl cannot reach namespace '$NS': ${out##*$'\n'}
+  - Check the kubeconfig (valheimctl fleet set K8S_KUBECONFIG=<file>), the namespace (K8S_NAMESPACE; it must already exist) and the access listed in docs/requirements.md."
+  fi
+}
 
 # ---------------------------------------------------------------- planning (backend independent)
 parse_nn() {
@@ -1109,6 +1125,7 @@ main() {
   set -- "${pos[@]:1}"
   resolve_locations "$cmd"
   select_backend
+  case $cmd in init|fleet|passwd|menu) ;; *) require_engine;; esac
   case $cmd in
     apply) if ((ALL)); then each_world cmd_apply; else cmd_apply "${1:-}"; fi;;
     list) cmd_list;; status) cmd_status "$@";; check) cmd_check;; logs) cmd_logs "$@";;

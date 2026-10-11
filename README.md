@@ -24,7 +24,7 @@ git clone https://github.com/fettigcj/valheimctl ~/valheimctl
 ```
 Make the command available everywhere. Link it rather than copying it, because the menu needs the files that sit next to it:
 ```bash
-sudo ln -s ~/valheimctl/valheimctl /usr/local/sbin/valheimctl
+sudo ln -s ~/valheimctl/valheimctl /usr/local/bin/valheimctl
 ```
 
 ## How it works
@@ -71,12 +71,13 @@ the save it was meant to, rolling back by itself otherwise. `rm` removes the con
 ## Quick start
 An instance is a directory. Make one and stand in it:
 ```bash
-sudo mkdir /srv/valheim
+mkdir ~/valheim
 ```
 ```bash
-cd /srv/valheim
+cd ~/valheim
 ```
-Then either use the menu, which walks you through the first setup and lets you add worlds with a few key presses:
+(`sudo` below is for Docker, which needs it unless your user is in the `docker` group; Kubernetes and rootless Podman need none. Pick one
+way and stay with it: see [docs/getting-started.md](docs/getting-started.md#do-i-need-sudo).) Then either use the menu, which walks you through the first setup and lets you add worlds with a few key presses:
 ```bash
 sudo valheimctl menu
 ```

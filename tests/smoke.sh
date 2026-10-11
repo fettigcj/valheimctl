@@ -44,6 +44,9 @@ tf "world 0 rejected" "$V" new 0 Nope
 printf 'SUFFIX=Early
 ' >"$T/etc/worlds/07.env"
 t "list shows a configured but undeployed world" "$V" list; has "$T/out" 'valheim07-Early +2070 +none'; rm -f "$T/etc/worlds/07.env"
+FAKE_DOCKER_DENIED=1 tf "a Docker permission problem is explained, not hidden" "$V" list; has "$T/out" 'permission denied'; has "$T/out" 'docker group'
+tf "a missing engine program is explained" env VALHEIMCTL_DOCKER=/nonexistent/docker "$V" list; has "$T/out" 'cannot use'
+t "setup commands need no engine" env FAKE_DOCKER_DENIED=1 "$V" fleet show
 echo "- adopt a legacy container, then apply under the new name"
 mkdir -p "$WL/valheim04-KidWorld" "$T/data/valheim04/data"; for f in _main.1455.ok _main.1455.db2 00_00__0_1.chunk; do echo x >"$WL/valheim04-KidWorld/$f"; done
 "$HERE/fakedocker" run -d --name valheim04 -e ADMINLIST_IDS="111 222" -e WORLD_NAME=valheim04-KidWorld -e SERVER_NAME=valheim04-KidWorld \

@@ -16,21 +16,34 @@ git clone https://github.com/fettigcj/valheimctl ~/valheimctl
 ```
 Make the command available everywhere. Link it (do not copy it; the menu needs its neighbouring files):
 ```bash
-sudo ln -s ~/valheimctl/valheimctl /usr/local/sbin/valheimctl
+sudo ln -s ~/valheimctl/valheimctl /usr/local/bin/valheimctl
 ```
 Check that it works:
 ```bash
 valheimctl --help
 ```
 
+## Do I need sudo?
+It depends on what you run it against. Pick one way and stay with it:
+
+| You use | Do you need `sudo`? |
+|---|---|
+| **Docker** | Only because Docker itself needs it. Either put `sudo` in front of every command (simplest, works everywhere), or let your user talk to Docker once and then use no `sudo`: `sudo usermod -aG docker $USER`, then log out and in again. (The `docker` group is root-equivalent on the machine, so only do this for a user you trust.) |
+| **Podman (rootless)** | No. |
+| **Kubernetes** | No. valheimctl only needs a kubeconfig; see [requirements.md](requirements.md). |
+
+The examples below show `sudo`; leave it off if you chose the no-`sudo` way. **Do not mix the two:** a command run with `sudo` creates files owned by root
+in your instance directory, which your normal user then cannot write (and the other way round). If you are not sure, use `sudo` for everything.
+If valheimctl cannot reach Docker it says so and what to do, rather than showing an empty list.
+
 ## 3. Make a home for your worlds
 An **instance** is just a directory. Everything valheimctl needs (settings, world data, backups) lives inside it, and it is found from the
-directory you are standing in, the way `git` finds a repository. Pick any location:
+directory you are standing in, the way `git` finds a repository. Pick any location. A folder in your home directory is the easiest, because you can create it without `sudo`:
 ```bash
-sudo mkdir /srv/valheim
+mkdir ~/valheim
 ```
 ```bash
-cd /srv/valheim
+cd ~/valheim
 ```
 From here on, run valheimctl from inside this directory (or any folder below it).
 
@@ -95,9 +108,9 @@ that world, and valheimctl refuses to do it while players are connected unless y
 
 ## 8. Where things are
 ```
-/srv/valheim/config/       settings (fleet.env, worlds/NN.env) and password files
-/srv/valheim/worlds/       Docker/Podman: each world's data
-/srv/valheim/backups/      snapshots valheimctl takes before every change
+~/valheim/config/       settings (fleet.env, worlds/NN.env) and password files
+~/valheim/worlds/       Docker/Podman: each world's data
+~/valheim/backups/      snapshots valheimctl takes before every change
 ```
 Back up this directory (without the password files if you share it) and you can rebuild everything.
 
