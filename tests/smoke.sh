@@ -47,6 +47,8 @@ t "list shows a configured but undeployed world" "$V" list; has "$T/out" 'valhei
 FAKE_DOCKER_DENIED=1 tf "a Docker permission problem is explained, not hidden" "$V" list; has "$T/out" 'permission denied'; has "$T/out" 'docker group'
 tf "a missing engine program is explained" env VALHEIMCTL_DOCKER=/nonexistent/docker "$V" list; has "$T/out" 'cannot use'
 t "setup commands need no engine" env FAKE_DOCKER_DENIED=1 "$V" fleet show
+FAKE_DOCKER_DENIED=1 t "set --no-apply only edits a file, so it needs no engine" "$V" set 8 SUFFIX=Offline --no-apply; rm -f "$T/etc/worlds/08.env"
+FAKE_DOCKER_DENIED=1 tf "set without --no-apply deploys, so it does need the engine" "$V" -y set 8 SUFFIX=Offline; rm -f "$T/etc/worlds/08.env"
 echo "- adopt a legacy container, then apply under the new name"
 mkdir -p "$WL/valheim04-KidWorld" "$T/data/valheim04/data"; for f in _main.1455.ok _main.1455.db2 00_00__0_1.chunk; do echo x >"$WL/valheim04-KidWorld/$f"; done
 "$HERE/fakedocker" run -d --name valheim04 -e ADMINLIST_IDS="111 222" -e WORLD_NAME=valheim04-KidWorld -e SERVER_NAME=valheim04-KidWorld \
@@ -66,6 +68,7 @@ has "$S/valheim-main-04.args" '-p 2040:2040/udp'; has "$S/valheim-main-04.args" 
 has "$S/valheim-main-04.args" 'label valheimctl.instance=main'; has "$S/valheim-main-04.env" '^UPDATE_CRON=50 0,6,12,18'
 ls "$T/data/_backups"/valheim04-KidWorld-2*.tgz >/dev/null 2>&1 && ok "UTC-stamped backup written" || bad "backup written"
 t "second apply is a no-op" "$V" -y apply 04; has "$T/out" 'nothing to do'
+FAKE_DOCKER_DENIED=1 t "a dry run still prints its plan when the engine is unreachable" "$V" -n apply 04 --force; has "$T/out" 'not reachable'; has "$T/out" 'docker run'
 
 echo "- ports: block scheme, honor-original, optional pages"
 tf "set rejects derived port keys" "$V" -y set 04 SERVER_PORT=1; tf "set rejects STATUS_HTTP" "$V" -y set 04 STATUS_HTTP=true

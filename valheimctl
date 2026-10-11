@@ -144,6 +144,11 @@ be() { local op=$1; shift; "${FAMILY}_$op" "$@"; }   # dispatch to dk_<op> or k8
 # would look like "no containers" because individual calls hide their errors.
 require_engine() {
   local out
+  if ((DRY)); then   # a dry run may be a preview on a machine that cannot reach the engine: say so and carry on
+    if [[ $FAMILY == dk ]]; then "$DOCKER" version >/dev/null 2>&1 || warn "$DOCKER is not reachable: this dry run assumes nothing is deployed"
+    else kc get deployments --limit=1 >/dev/null 2>&1 || warn "the cluster is not reachable: this dry run assumes nothing is deployed"; fi
+    return 0
+  fi
   if [[ $FAMILY == dk ]]; then
     out=$("$DOCKER" version --format '{{.Server.Version}}' 2>&1) \
       || die "cannot use $DOCKER: ${out##*$'\n'}
@@ -1125,7 +1130,11 @@ main() {
   set -- "${pos[@]:1}"
   resolve_locations "$cmd"
   select_backend
-  case $cmd in init|fleet|passwd|menu) ;; *) require_engine;; esac
+  case $cmd in
+    init|fleet|passwd|menu) ;;                          # settings and passwords only: no engine involved
+    set) ((NOAPPLY || DRY)) || require_engine;;         # `set` deploys unless told not to
+    *) require_engine;;
+  esac
   case $cmd in
     apply) if ((ALL)); then each_world cmd_apply; else cmd_apply "${1:-}"; fi;;
     list) cmd_list;; status) cmd_status "$@";; check) cmd_check;; logs) cmd_logs "$@";;

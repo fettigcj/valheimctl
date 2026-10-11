@@ -108,11 +108,44 @@ Addresses below are documentation placeholders (192.0.2.0/24).
 | # | Recipe | Settings | What it exposes | Failure behavior |
 |---|---|---|---|---|
 | 1 | **Built-in service load balancer only** (for example K3s ServiceLB) | defaults (`K8S_EXPOSE=loadbalancer`) | UDP game and query ports on the **node IPs** | The address players use is a node IP: forward to one node and that node is a single point of failure. `K8S_TRAFFIC_POLICY=Local` answers only on the node running the pod. |
-| 2 | **MetalLB, layer 2, dedicated network** | `K8S_LB_CLASS` (if the cluster has more than one load balancer), `K8S_LB_IP=192.0.2.100`, optionally `K8S_SERVICE_ANNOTATIONS=metallb.io/address-pool=game`, `K8S_AFFINITY_PREFERRED`, `K8S_TOLERATION_SECONDS` | A fixed virtual IP per world on the network the speakers are attached to | The IP **floats** between nodes: a firewall rule targets one stable address. A failed node moves the IP after the load balancer notices and the pod reschedules (storage permitting). `Cluster` policy is the simple choice here. |
+| 2 | **MetalLB, layer 2, dedicated network** | `K8S_LB_CLASS` (if the cluster has more than one load balancer), `K8S_LB_IP=192.0.2.100`, optionally `K8S_SERVICE_ANNOTATIONS=metallb.io/address-pool=game`, `K8S_AFFINITY_PREFERRED`, `K8S_TOLERATION_SECONDS` | A fixed virtual IP per world on the network the speakers are attached to | The IP **floats** between nodes: a firewall rule targets one stable address. A failed node moves the IP after the load balancer notices and the pod reschedules (storage permitting); see the worked example below. `Cluster` policy is the simple choice here. |
 | 3 | **MetalLB, BGP** | as 2, plus the BGP annotations/pools your router expects via `K8S_SERVICE_ANNOTATIONS` | A routed virtual IP | Convergence is as fast as your router; `Local` policy gives the best behavior (only nodes with the pod advertise). |
 | 4 | **hostPort pinned to a node** | `K8S_EXPOSE=hostport`, `K8S_NODE_SELECTOR=kubernetes.io/hostname=node-a` | The two UDP ports on **that node's IP** only; no Service | Simple and predictable; the world cannot move, and the node is a single point of failure. Two worlds cannot use the same host port on one node (the port scheme prevents that). |
 | 5 | **NodePort behind an external load balancer** | `K8S_EXPOSE=nodeport` | A Service of type NodePort; the cluster picks node ports (30000-32767 by default), **so they cannot equal the game ports** | Your external load balancer or router maps game port to node port; look up the assigned ports with `kubectl -n <ns> get svc <name>-game`. |
 | 6 | **None** (you supply routing: your own Service, ingress controller with UDP support, a service mesh, ...) | `K8S_EXPOSE=none` | Nothing outside the cluster | Entirely up to you. |
+
+### Worked example: MetalLB in layer 2 mode
+For a cluster that also runs a built-in load balancer (as K3s does), a pool that hands out addresses only on request, and worlds that should keep
+one stable address. Set these once for the instance:
+```bash
+valheimctl fleet set K8S_EXPOSE=loadbalancer
+```
+```bash
+valheimctl fleet set K8S_LB_CLASS=metallb
+```
+```bash
+valheimctl fleet set K8S_TRAFFIC_POLICY=Local
+```
+Then give each world its own address from the pool (a pool with automatic assignment turned off will not hand one out unless asked):
+```bash
+valheimctl set 1 K8S_LB_IP=192.0.2.101
+```
+Optionally prefer one node and fail over faster than the 5-minute default when a node dies:
+```bash
+valheimctl fleet set K8S_AFFINITY_PREFERRED=topology.example.com/host=node-a
+```
+```bash
+valheimctl fleet set K8S_TOLERATION_SECONDS=30
+```
+What each setting does here:
+* **`K8S_LB_CLASS`**: a load balancer serves only Services of its own class. With two load balancers in the cluster, name the one you want, otherwise
+  the other may claim the Service (or nobody does).
+* **`K8S_LB_IP`**: the stable address a firewall rule or DNS name points at. It is written both as `loadBalancerIP` and as the MetalLB address annotation.
+* **`K8S_TRAFFIC_POLICY=Local`**: the pod sees each player's real address, there is no extra network hop, and in layer 2 mode the address is announced only
+  by the node that runs the pod, so the address follows the pod. With `Cluster` the pod sees only an address inside the cluster, and a hop between nodes is possible.
+* A dead *node* adds the node-not-ready delay before the pod moves (30 to 300 seconds); `K8S_TOLERATION_SECONDS` shortens it. A deleted *pod* moved in about
+  3 seconds in one cluster test.
+* **Do not use ping as a health check:** a load-balancer address only answers on its service ports, so ICMP to it is silent. Test with the game port.
 
 Notes that apply to every recipe:
 * **Failover time.** A pod on a dead node is evicted after `K8S_TOLERATION_SECONDS` (cluster default 300 s); `K8S_AFFINITY_PREFERRED` lets a world favor one node without forbidding the others. A world with a node-local ReadWriteOnce volume cannot move at all; failover needs network-backed storage.
