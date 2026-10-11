@@ -107,6 +107,38 @@ def world_ports(n, block=0, honor=False):
     return game, game + 1
 
 
+def port_choice_options():
+    """The 'which ports does this instance control?' list: blocks 0-9 (20x0s ... 29x0s) and A (the original 24x6s)."""
+    opts = []
+    for i in range(10):
+        g, q = world_ports(1, i, False)
+        opts.append(("%d   (%dx0s: world 1 = UDP %d-%d)" % (i, 20 + i, g, q), str(i)))
+    opts.append(("A   (24x6s: Start with original 2456 default)", "A"))
+    return opts
+
+
+def current_port_choice(fleet):
+    if fleet.get("HONOR_ORIGINAL_PORTS") == "true":
+        return "A"
+    block = fleet.get("PORT_BLOCK", "0")
+    return block if block in [str(i) for i in range(10)] else "0"
+
+
+def port_choice_label(fleet):
+    cur = current_port_choice(fleet)
+    for label, value in port_choice_options():
+        if value == cur:
+            return label
+    return cur
+
+
+def port_choice_args(choice):
+    """The `valheimctl fleet set` arguments for a choice. The two underlying settings are always changed together."""
+    if choice == "A":
+        return ["HONOR_ORIGINAL_PORTS=true"]
+    return ["PORT_BLOCK=%s" % choice, "HONOR_ORIGINAL_PORTS=false"]
+
+
 def choice_label(options, value):
     for label, val in options:
         if val == value:
@@ -787,6 +819,25 @@ class App:
                     save(key, v)
             return do
 
+        def ports():
+            cur = current_port_choice(self.fleet())
+            v = self.choose("Which ports does this instance control?", port_choice_options(), cur,
+                            note="Each world uses two UDP ports: the game port and the next one.")
+            if v is None or v == cur:
+                return
+            wdir = os.path.join(self.cfg, "worlds")
+            count = len([n for n in (os.listdir(wdir) if os.path.isdir(wdir) else []) if parse_world_number(n)])
+            if count and not self.confirm("Change the ports?", [
+                    "%d existing world(s) get new ports the next time each one is applied." % count,
+                    "Players' saved addresses and your router forwards must change too.", "",
+                    "Change the ports anyway?"]):
+                return
+            rc, out = self.run.run(["fleet", "set"] + port_choice_args(v))
+            if rc != 0:
+                self.message("Could not save", out.strip().splitlines()[-6:])
+            else:
+                self.notice = "Saved. Each world takes its new ports the next time it is applied."
+
         def password():
             if not self.confirm("Shared default password", [
                     "Every world should have its own join password (set when you add",
@@ -802,11 +853,7 @@ class App:
             f = self.fleet()
             return [
                 {"kind": "header", "label": "  Settings shared by every world (a world's own setting wins)"},
-                {"kind": "item", "label": "Port block", "value": "%s  (UDP %d-%d ...)" % (f.get("PORT_BLOCK", "0"), world_ports(1, f.get("PORT_BLOCK", "0"), f.get("HONOR_ORIGINAL_PORTS") == "true")[0],
-                                                                                      world_ports(1, f.get("PORT_BLOCK", "0"), f.get("HONOR_ORIGINAL_PORTS") == "true")[1]),
-                 "do": choice("PORT_BLOCK", "Port block (changes every world's ports)", [("%d  (ports %d00s)" % (i, 20 + i), str(i)) for i in range(10)], "0")},
-                {"kind": "item", "label": "Use the original ports (2456...)", "value": "Yes" if f.get("HONOR_ORIGINAL_PORTS") == "true" else "No",
-                 "do": choice("HONOR_ORIGINAL_PORTS", "Use the original ports?", YES_NO, "false")},
+                {"kind": "item", "label": "Ports this instance controls", "value": port_choice_label(f), "do": ports},
                 {"kind": "item", "label": "Address players use", "value": f.get("PUBLIC_HOST", "(not set)"),
                  "do": text("PUBLIC_HOST", "Address players use", "Host name or IP shown as the join address:")},
                 {"kind": "item", "label": "Listed in the server list", "value": "Yes" if f.get("SERVER_PUBLIC", "true") == "true" else "No",

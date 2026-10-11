@@ -28,6 +28,9 @@ consecutively, so each world gets a block of ten:
 With `HONOR_ORIGINAL_PORTS=true` the worlds sit on 2456/2457, 2466/2467, 2476/2477 ... up to world 9 = 2536/2537, with status and supervisor
 at game - 5 and game - 4 so each world stays inside one block of ten. Use it to keep addresses players already know.
 
+In the menu this is one choice, "Ports this instance controls": blocks 0 to 9 (20x0s to 29x0s) or **A** (24x6s, starting with the original 2456); it sets
+`PORT_BLOCK` and `HONOR_ORIGINAL_PORTS` together, and warns before changing the ports of worlds that already exist.
+
 A second instance on the same host sets `PORT_BLOCK=1` (2100-2199), `PORT_BLOCK=2`, and so on, and a different `INSTANCE_ID`
 (containers are named `valheim-<INSTANCE_ID>-NN`). Only one instance should use `HONOR_ORIGINAL_PORTS`.
 

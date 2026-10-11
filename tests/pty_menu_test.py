@@ -103,12 +103,12 @@ def main():
         if not cond:
             failures.append(name)
 
-    def instance(with_config=True, default_pw=True, own_pw=False):
+    def instance(with_config=True, default_pw=True, own_pw=False, fleet_extra=""):
         d = tempfile.mkdtemp(dir=tmp)
         if with_config:
             os.makedirs(os.path.join(d, "config", "worlds"))
             os.makedirs(os.path.join(d, "config", "secrets"))
-            open(os.path.join(d, "config", "fleet.env"), "w").write("BACKEND=docker\nINSTANCE_ID=main\nPORT_BLOCK=0\n")
+            open(os.path.join(d, "config", "fleet.env"), "w").write("BACKEND=docker\nINSTANCE_ID=main\nPORT_BLOCK=0\n" + fleet_extra)
             open(os.path.join(d, "config", "worlds", "01.env"), "w").write("SUFFIX=Test\n")
             if default_pw:
                 open(os.path.join(d, "config", "secrets", "default.server.pass"), "w").write("secret1")
@@ -185,11 +185,25 @@ def main():
     check("backups list was read", "CALL backups list 1 --json" in c, c)
     check("restore of the newest restore point", "CALL restore 1 g:20261009-112915 -y" in c, c)
 
-    print("- instance settings")
+    print("- instance settings: one 'ports' choice (blocks 0-9 and A)")
     log = os.path.join(tmp, "g.log")
-    # f -> Port block (first item) Enter -> choose 1 (Down) Enter -> Esc -> q
-    st = drive(["f", ENTER, DOWN, ENTER, ESC, "q"], instance(), fake, log)
-    check("PORT_BLOCK=1 saved via fleet set", "CALL fleet set PORT_BLOCK=1" in calls(log), calls(log))
+    # f -> Ports (first item) Enter -> Down to block 1 -> Enter -> a world exists, so confirm y -> Esc -> q
+    st = drive(["f", ENTER, DOWN, ENTER, "y", ESC, "q"], instance(), fake, log)
+    check("block 1 saved, original ports switched off, in one fleet set", "CALL fleet set PORT_BLOCK=1 HONOR_ORIGINAL_PORTS=false" in calls(log), calls(log))
+    log = os.path.join(tmp, "g2.log")
+    st = drive(["f", ENTER] + [DOWN] * 10 + [ENTER, "y", ESC, "q"], instance(), fake, log)
+    check("A (original 2456 ports) saved", "CALL fleet set HONOR_ORIGINAL_PORTS=true" in calls(log), calls(log))
+    log = os.path.join(tmp, "g3.log")
+    st = drive(["f", ENTER, DOWN, ENTER, "n", ESC, "q"], instance(), fake, log)
+    check("declining the warning saves nothing", not any(c.startswith("CALL fleet set") for c in calls(log)), calls(log))
+    log = os.path.join(tmp, "g4.log")
+    # with the original ports already on, A is preselected: Enter on it changes nothing
+    st = drive(["f", ENTER, ENTER, ESC, "q"], instance(fleet_extra="HONOR_ORIGINAL_PORTS=true\n"), fake, log)
+    check("the current choice is preselected (Enter changes nothing)", not any(c.startswith("CALL fleet set") for c in calls(log)), calls(log))
+    log = os.path.join(tmp, "g5.log")
+    # switching away from A: from the preselected A, Up moves to block 9
+    st = drive(["f", ENTER, UP, ENTER, "y", ESC, "q"], instance(fleet_extra="HONOR_ORIGINAL_PORTS=true\n"), fake, log)
+    check("from A, choosing block 9 turns the original ports off", "CALL fleet set PORT_BLOCK=9 HONOR_ORIGINAL_PORTS=false" in calls(log), calls(log))
 
     print("- first-run setup in an empty directory")
     log = os.path.join(tmp, "h.log")

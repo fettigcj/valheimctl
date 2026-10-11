@@ -39,7 +39,7 @@ password exists you can instead pick "Use the shared default password".
 **Remove a world (`D`):** stops the world and stops managing it. **Nothing is deleted:** world data, backups and the settings file stay on disk
 (the settings are kept as `config/worlds/NN.env.removed-...`, rename it back to manage the world again).
 
-**Settings shared by every world (`F`):** port block, original ports (2456...), the address players use, whether worlds are listed publicly, admins,
+**Settings shared by every world (`F`):** which ports this instance controls (one list: blocks 0 to 9, meaning 20x0s to 29x0s, or **A** for the original 24x6s, starting at 2456), the address players use, whether worlds are listed publicly, admins,
 update-check hours, and an optional shared default password for worlds that have none of their own.
 
 ## Good to know

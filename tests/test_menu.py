@@ -58,6 +58,30 @@ class Ports(unittest.TestCase):
         self.assertEqual(menu.world_ports(4, 0, True), (2486, 2487))
 
 
+class PortChoice(unittest.TestCase):
+    def test_options_are_blocks_0_to_9_then_a(self):
+        opts = menu.port_choice_options()
+        self.assertEqual([v for _, v in opts], [str(i) for i in range(10)] + ["A"])
+        self.assertIn("20x0s", opts[0][0])
+        self.assertIn("29x0s", opts[9][0])
+        self.assertIn("24x6s", opts[10][0])
+        self.assertIn("Start with original 2456 default", opts[10][0])
+
+    def test_current_choice_follows_both_settings(self):
+        self.assertEqual(menu.current_port_choice({}), "0")
+        self.assertEqual(menu.current_port_choice({"PORT_BLOCK": "3"}), "3")
+        self.assertEqual(menu.current_port_choice({"PORT_BLOCK": "3", "HONOR_ORIGINAL_PORTS": "true"}), "A")
+        self.assertEqual(menu.current_port_choice({"PORT_BLOCK": "99"}), "0")
+
+    def test_label_shows_what_is_selected(self):
+        self.assertIn("24x6s", menu.port_choice_label({"HONOR_ORIGINAL_PORTS": "true"}))
+        self.assertIn("23x0s", menu.port_choice_label({"PORT_BLOCK": "3"}))
+
+    def test_choosing_a_block_switches_the_original_ports_off(self):
+        self.assertEqual(menu.port_choice_args("3"), ["PORT_BLOCK=3", "HONOR_ORIGINAL_PORTS=false"])
+        self.assertEqual(menu.port_choice_args("A"), ["HONOR_ORIGINAL_PORTS=true"])
+
+
 class Misc(unittest.TestCase):
     def test_free_worlds(self):
         self.assertEqual(menu.free_world_numbers([1, 2, 4]), [3, 5, 6, 7, 8, 9])
