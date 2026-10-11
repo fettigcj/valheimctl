@@ -458,7 +458,11 @@ k8_options_check() {
 }
 # service_annotations : the game Service's annotations as "key: value" lines (K8S_LB_IP hint first, then the passthrough list)
 service_annotations() {
-  [[ -z ${CFG[K8S_LB_IP]:-} || ${CFG[K8S_EXPOSE]:-loadbalancer} != loadbalancer ]] || printf '%s: %s\n' "metallb.io/loadBalancerIPs" "$(ystr "${CFG[K8S_LB_IP]}")"
+  # MetalLB refuses a Service that has both its annotation and spec.loadBalancerIP, so a MetalLB class gets the annotation and any other load balancer
+  # gets the standard spec field (see below).
+  if [[ -n ${CFG[K8S_LB_IP]:-} && ${CFG[K8S_EXPOSE]:-loadbalancer} == loadbalancer && ${CFG[K8S_LB_CLASS]:-} == *metallb* ]]; then
+    printf '%s: %s\n' "metallb.io/loadBalancerIPs" "$(ystr "${CFG[K8S_LB_IP]}")"
+  fi
   local v=${CFG[K8S_SERVICE_ANNOTATIONS]:-} pair
   if [[ -n $v ]]; then while IFS= read -r pair; do [[ -z $pair ]] && continue; printf '%s: %s\n' "$(ystr "${pair%%=*}")" "$(ystr "${pair#*=}")"; done <<<"${v//;/$'\n'}"; fi
 }
@@ -562,7 +566,7 @@ k8_manifest() { # $1 = secret resourceVersion (changes the pod template, so a pa
     echo "spec:"; if [[ $expose == nodeport ]]; then echo "  type: NodePort"; else echo "  type: LoadBalancer"; fi
     [[ -z ${CFG[K8S_TRAFFIC_POLICY]:-} ]] || echo "  externalTrafficPolicy: ${CFG[K8S_TRAFFIC_POLICY]}"
     [[ $expose != loadbalancer || -z ${CFG[K8S_LB_CLASS]:-} ]] || echo "  loadBalancerClass: $(ystr "${CFG[K8S_LB_CLASS]}")"
-    [[ $expose != loadbalancer || -z ${CFG[K8S_LB_IP]:-} ]] || echo "  loadBalancerIP: $(ystr "${CFG[K8S_LB_IP]}")"
+    [[ $expose != loadbalancer || -z ${CFG[K8S_LB_IP]:-} || ${CFG[K8S_LB_CLASS]:-} == *metallb* ]] || echo "  loadBalancerIP: $(ystr "${CFG[K8S_LB_IP]}")"
     echo "  selector:"; echo "    app.kubernetes.io/instance: $C"; echo "  ports:"
     echo "    - name: game"; echo "      protocol: UDP"; echo "      port: $GAME_PORT"; echo "      targetPort: game"
     echo "    - name: query"; echo "      protocol: UDP"; echo "      port: $QUERY_PORT"; echo "      targetPort: query"

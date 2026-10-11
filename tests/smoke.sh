@@ -167,8 +167,10 @@ t "k8s publish status page" "$V" -y set 04 PUBLISH_STATUS=true; has "$K/manifest
 tf "k8s rejects a bad traffic policy before saving" "$V" -y set 04 K8S_TRAFFIC_POLICY=Bogus; has "$T/out" 'K8S_TRAFFIC_POLICY must be'; hasnt "$T/ketc/worlds/04.env" 'Bogus'
 t "k8s exposure and placement knobs" "$V" -y set 04 K8S_EXPOSE=loadbalancer K8S_LB_CLASS=example.com/lb K8S_LB_IP=192.0.2.10 K8S_TRAFFIC_POLICY=Local "K8S_SERVICE_ANNOTATIONS=lb.example/pool=game;foo/bar=baz" K8S_AFFINITY_PREFERRED=zone=a K8S_TOLERATION_SECONDS=30 K8S_PRIORITY_CLASS=important
 has "$K/manifest.txt" 'loadBalancerClass: "example.com/lb"'; has "$K/manifest.txt" 'externalTrafficPolicy: Local'; has "$K/manifest.txt" 'loadBalancerIP: "192.0.2.10"'
-has "$K/manifest.txt" '"lb.example/pool": "game"'; has "$K/manifest.txt" '"foo/bar": "baz"'; has "$K/manifest.txt" 'metallb.io/loadBalancerIPs'
+has "$K/manifest.txt" '"lb.example/pool": "game"'; has "$K/manifest.txt" '"foo/bar": "baz"'; hasnt "$K/manifest.txt" 'metallb.io/loadBalancerIPs'
 has "$K/manifest.txt" 'preferredDuringSchedulingIgnoredDuringExecution'; has "$K/manifest.txt" 'values: \["a"\]'; has "$K/manifest.txt" 'tolerationSeconds: 30'; has "$K/manifest.txt" 'priorityClassName: important'
+t "a MetalLB class gets the annotation and NOT spec.loadBalancerIP (MetalLB rejects both)" "$V" -y set 04 K8S_LB_CLASS=metallb; has "$K/manifest.txt" 'metallb.io/loadBalancerIPs: "192.0.2.10"'; hasnt "$K/manifest.txt" 'loadBalancerIP:'
+t "any other class gets the standard field and no MetalLB annotation" "$V" -y set 04 K8S_LB_CLASS=example.com/lb; has "$K/manifest.txt" 'loadBalancerIP: "192.0.2.10"'; hasnt "$K/manifest.txt" 'metallb.io/loadBalancerIPs'
 t "apply -n prints exactly what is exposed" "$V" -n apply 04; has "$T/out" 'type=LoadBalancer class=example.com/lb ip=192.0.2.10 udp 2040,2041 externalTrafficPolicy=Local'; has "$T/out" 'failoverAfter=30s'
 t "check prints the exposure of each world" "$V" check; has "$T/out" 'type=LoadBalancer class=example.com/lb'
 t "nodeport mode" "$V" -y set 04 K8S_EXPOSE=nodeport; has "$K/manifest.txt" 'type: NodePort'; hasnt "$K/manifest.txt" 'loadBalancerClass|loadBalancerIP|nodePort:'

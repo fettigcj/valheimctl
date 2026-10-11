@@ -83,7 +83,7 @@ be exposed for the safety checks.
 | `K8S_NAMESPACE` | `valheim` | namespace for the instance's objects |
 | `K8S_EXPOSE` | `loadbalancer` | how the game ports leave the cluster: `loadbalancer`, `nodeport`, `hostport` (container hostPort, no Service) or `none` (you provide routing). See the recipes below |
 | `K8S_LB_CLASS` | unset | `loadBalancerClass` of the game Service: pick which load balancer serves it (for example to opt out of the built-in one) |
-| `K8S_LB_IP` | unset | fixed IP for the game Service (`loadBalancerIP`, plus the `metallb.io/loadBalancerIPs` annotation). `loadbalancer` mode only |
+| `K8S_LB_IP` | unset | fixed IP for the game Service. With a MetalLB class (`K8S_LB_CLASS` containing `metallb`) it is written as the `metallb.io/loadBalancerIPs` annotation; with any other class it is the standard `loadBalancerIP` field (MetalLB rejects a Service that has both). `loadbalancer` mode only |
 | `K8S_SERVICE_ANNOTATIONS` | unset | free-form annotations for the game Service as `key=value;key2=value2` (address pool, shared-IP keys, ... differ per load balancer) |
 | `K8S_TRAFFIC_POLICY` | cluster default | `externalTrafficPolicy`: `Cluster` or `Local`. `Local` answers only on the node that runs the pod and keeps client IPs; `Cluster` answers on every node but hides client IPs |
 | `K8S_EXPOSE_WEB` | `none` | `loadbalancer` exposes the optional status/supervisor Service |
@@ -140,7 +140,7 @@ valheimctl fleet set K8S_TOLERATION_SECONDS=30
 What each setting does here:
 * **`K8S_LB_CLASS`**: a load balancer serves only Services of its own class. With two load balancers in the cluster, name the one you want, otherwise
   the other may claim the Service (or nobody does).
-* **`K8S_LB_IP`**: the stable address a firewall rule or DNS name points at. It is written both as `loadBalancerIP` and as the MetalLB address annotation.
+* **`K8S_LB_IP`**: the stable address a firewall rule or DNS name points at. It is written as the MetalLB address annotation when the class is MetalLB, and as the standard `loadBalancerIP` field for any other load balancer (never both: MetalLB refuses that).
 * **`K8S_TRAFFIC_POLICY=Local`**: the pod sees each player's real address, there is no extra network hop, and in layer 2 mode the address is announced only
   by the node that runs the pod, so the address follows the pod. With `Cluster` the pod sees only an address inside the cluster, and a hop between nodes is possible.
 * A dead *node* adds the node-not-ready delay before the pod moves (30 to 300 seconds); `K8S_TOLERATION_SECONDS` shortens it. A deleted *pod* moved in about
