@@ -146,7 +146,7 @@ require_engine() {
   local out
   if ((DRY)); then   # a dry run may be a preview on a machine that cannot reach the engine: say so and carry on
     if [[ $FAMILY == dk ]]; then "$DOCKER" version >/dev/null 2>&1 || warn "$DOCKER is not reachable: this dry run assumes nothing is deployed"
-    else kc get deployments --limit=1 >/dev/null 2>&1 || warn "the cluster is not reachable: this dry run assumes nothing is deployed"; fi
+    else kc get deployments -o name --chunk-size=1 >/dev/null 2>&1 || warn "the cluster is not reachable: this dry run assumes nothing is deployed"; fi
     return 0
   fi
   if [[ $FAMILY == dk ]]; then
@@ -155,7 +155,7 @@ require_engine() {
   - If it says 'permission denied': run valheimctl with sudo, or let your user use Docker: sudo usermod -aG docker \$USER, then log out and in again (the docker group is root-equivalent on the host).
   - If the program is missing or not running: install or start $DOCKER, or set BACKEND in the instance settings."
   else
-    out=$(kc get deployments --limit=1 2>&1) \
+    out=$(kc get deployments -o name --chunk-size=1 2>&1) \
       || die "kubectl cannot reach namespace '$NS': ${out##*$'\n'}
   - Check the kubeconfig (valheimctl fleet set K8S_KUBECONFIG=<file>), the namespace (K8S_NAMESPACE; it must already exist) and the access listed in docs/requirements.md."
   fi

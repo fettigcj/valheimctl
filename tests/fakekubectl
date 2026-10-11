@@ -5,6 +5,7 @@
 K=${FAKE_K:?}; mkdir -p "$K"; echo "kubectl $*" >>"$K/calls.log"
 args=(); while [[ $# -gt 0 ]]; do case $1 in --context|-n|--kubeconfig) shift 2;; *) args+=("$1"); shift;; esac; done
 set -- "${args[@]}"; verb=$1; shift
+for a in "$@"; do [[ $a == --limit* ]] && { echo "error: unknown flag: --limit" >&2; echo "See 'kubectl get --help' for usage." >&2; exit 1; }; done
 jp=; prev=; for a in "$@"; do [[ $a == jsonpath=* ]] && jp=$a; [[ $prev == -o && $a == jsonpath=* ]] && jp=$a; prev=$a; done
 rv() { cat "$K/rv" 2>/dev/null || echo 1; }
 repl() { if [[ -e $K/replicas ]]; then cat "$K/replicas"; else grep -m1 '^  replicas:' "$K/manifest.txt" 2>/dev/null | awk '{print $2}'; fi; }
