@@ -8,10 +8,10 @@ directory, for `config/fleet.env`. So there is nothing to export: make a directo
 
 Make a directory for this instance and go into it (any path you like):
 ```bash
-mkdir /srv/valheimctl-main
+mkdir ~/valheimctl-main
 ```
 ```bash
-cd /srv/valheimctl-main
+cd ~/valheimctl-main
 ```
 Create the instance here (this makes `config/`, `worlds/` and `backups/` in the current directory):
 ```bash
@@ -30,7 +30,7 @@ sudo valheimctl fleet set ADMINLIST_IDS="7656119xxxxxxxxxx"
 There is no password to set yet: each world gets **its own join password** when you create it (`valheimctl new` asks), and you can change it
 later with `valheimctl passwd 4 server`. A shared default (`valheimctl passwd default server`) is optional.
 `valheimctl fleet show` prints the settings file. `sudo` keeps your current directory, so it finds the same instance. Docker needs root or
-membership in the `docker` group. To run valheimctl from somewhere else (a cron job, a service), set `VALHEIMCTL_HOME=/srv/valheimctl-main`.
+membership in the `docker` group. To run valheimctl from somewhere else (a cron job, a service), set `VALHEIMCTL_HOME=$HOME/valheimctl-main`.
 ## New world
 `valheimctl new 5 Cabin`, then `valheimctl list`. Join at `<host>:2050` (UDP; the game port for world 5; query port 2051). Forward both UDP
 ports one-to-one. See [ports.md](ports.md).
