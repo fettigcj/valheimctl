@@ -746,7 +746,7 @@ cmd_passwd() { # <NN|default> <server|supervisor>
   if [[ -t 0 ]]; then
     read -rs -p "New $kind password for $who: " p1; echo; read -rs -p "Again: " p2; echo
     [[ $p1 == "$p2" ]] || die "passwords do not match"
-  else IFS= read -r p1; fi
+  else IFS= read -r p1 || [[ -n $p1 ]]; fi   # a piped password need not end with a newline
   [[ ${#p1} -ge 5 ]] || die "password must be at least 5 characters (game requirement)"
   printf '%s' "$p1" | put "$ETC/secrets/$who.$kind.pass" 0600
   info "wrote $ETC/secrets/$who.$kind.pass (applies on next 'apply')"

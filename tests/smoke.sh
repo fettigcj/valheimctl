@@ -125,6 +125,7 @@ echo "- remove a world (its data is kept)"
 t "create world 6 for the removal test" "$V" -y new 6 Temp
 [[ ! -e $T/etc/secrets/06.server.pass ]] && ok "a scripted new uses the shared default password" || bad "a scripted new uses the shared default password"
 t "status says which password a world uses" "$V" status 6; has "$T/out" 'password:  the shared default'
+printf 'nonewline1' | t "a piped password does not need a trailing newline" "$V" passwd 7 server; [[ $(cat "$T/etc/secrets/07.server.pass") == nonewline1 ]] && ok "the password was stored exactly" || bad "the password was stored exactly"; rm -f "$T/etc/secrets/07.server.pass"
 echo "world6pw" | t "give world 6 a password of its own" "$V" passwd 6 server; [[ -f $T/etc/secrets/06.server.pass ]] && ok "its own password file exists" || bad "its own password file exists"
 t "status shows the world's own password" "$V" status 6; has "$T/out" "password:  this world's own"
 t "give world 6 back to the shared default" "$V" -y passwd 6 server --use-default; [[ ! -e $T/etc/secrets/06.server.pass ]] && ok "its own password file is gone" || bad "its own password file is gone"
