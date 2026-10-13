@@ -13,7 +13,7 @@ consecutively, so each world gets a block of ten:
 | query (UDP) | game + 1 | game + 1 | yes |
 | status page (TCP, legacy) | game + 5 | game - 5 | no |
 | supervisor page (TCP, legacy) | game + 6 | game - 4 | no |
-| web interface (future, optional) | the block's first port | same | no |
+| web console (optional, `valheimctl web run`) | the block's first port | same | no |
 
 `block` is `2000 + 100 x PORT_BLOCK` (`PORT_BLOCK` is 0 by default). So with defaults:
 

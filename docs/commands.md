@@ -27,6 +27,7 @@
 | `rm NN` | Remove the container/deployment. **World data is kept.** |
 | `remove NN` | Stop managing a world: removes its container/deployment and keeps its settings as `worlds/NN.env.removed-<stamp>`. World data, volumes, backups and password files are **not** deleted. Refused while players are connected unless `--force`. |
 | `menu` | A terminal menu (arrow keys): browse worlds, change settings, add and remove worlds, restore backups. Needs `python3`. See [menu.md](menu.md). |
+| `web run`, `web user add NAME [--role viewer]`, `web user list`, `web user remove NAME` | The browser console and its accounts. Needs `python3` and Flask. See [web.md](web.md). |
 | `fleet show` / `fleet set KEY=value ...` | Show or change the settings shared by every world; keeps comments, shows a diff, refuses per-world keys. |
 | `pull` | Docker/Podman: pull the image and show before/after. Kubernetes: explains the pull policy. |
 

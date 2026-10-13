@@ -867,6 +867,14 @@ cmd_remove() { # NN : stop managing a world. Its data, volumes, backups and pass
   if [[ $BACKEND == k8s ]]; then echo "World data stays in the volumes $C-config and $C-data (namespace $NS)."; else echo "World data stays in $HOMEDIR."; fi
 }
 
+cmd_web() { # run the browser console, or manage its accounts: valheimctl web run | web user add NAME [--role viewer] | user list | user remove NAME
+  command -v python3 >/dev/null 2>&1 || die "the web console needs python3 (the rest of valheimctl does not)"
+  local self app; self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}"); app="$(dirname "$self")/web/app.py"
+  [[ -f $app ]] || die "the web console files were not found next to valheimctl ($app). Install by linking the script from a clone of the repository instead of copying it"
+  [[ $# -gt 0 ]] || die "usage: valheimctl web run | web user add NAME [--role viewer|admin] | web user list | web user remove NAME"
+  VALHEIMCTL_BIN="$self" exec python3 "$app" --instance "$INST_HOME" "$@"
+}
+
 cmd_menu() { # a terminal menu (arrow keys) on top of the commands above; needs python3 with its built-in curses module
   command -v python3 >/dev/null 2>&1 || die "the menu needs python3 (the rest of valheimctl does not)"
   python3 -c 'import curses' 2>/dev/null || die "python3 has no curses module (Debian/Ubuntu: part of python3; macOS: included; Windows: use WSL)"
@@ -1109,6 +1117,7 @@ valheimctl [flags] COMMAND ...        (backend: docker | podman | k8s - see READ
   apply NN | apply --all        guarded (re)deploy from config
   start NN | stop NN            start / stop a world's container or pod (data kept)
   remove NN                     stop managing a world (its data and backups stay on disk)
+  web run | web user add|list|remove NAME   the browser console (needs python3 and Flask); see docs/web.md
   menu                          a terminal menu: arrow keys to browse worlds, edit settings, add and remove worlds (needs python3)
   services NN [--json]          the container's service table (supervisord)
   service NN valheim-server start|stop|restart  |  service NN valheim-backup|valheim-updater run
@@ -1138,7 +1147,7 @@ main() {
   resolve_locations "$cmd"
   select_backend
   case $cmd in
-    init|fleet|passwd|menu) ;;                          # settings and passwords only: no engine involved
+    init|fleet|passwd|menu|web) ;;                          # settings and passwords only: no engine involved
     set) ((NOAPPLY || DRY)) || require_engine;;         # `set` deploys unless told not to
     *) require_engine;;
   esac
@@ -1146,7 +1155,7 @@ main() {
     apply) if ((ALL)); then each_world cmd_apply; else cmd_apply "${1:-}"; fi;;
     list) cmd_list;; status) cmd_status "$@";; check) cmd_check;; logs) cmd_logs "$@";;
     backup) cmd_backup "$@";; backups) cmd_backups "$@";; restore) cmd_restore "$@";;
-    menu) cmd_menu;; remove) cmd_remove "$@";; services) cmd_services "$@";; service) cmd_service "$@";; start) cmd_start "$@";; stop) cmd_stop "$@";;
+    menu) cmd_menu;; web) cmd_web "$@";; remove) cmd_remove "$@";; services) cmd_services "$@";; service) cmd_service "$@";; start) cmd_start "$@";; stop) cmd_stop "$@";;
     restart) cmd_restart "$@";; rm) cmd_rm "$@";; pull) cmd_pull;;
     fleet) cmd_fleet "$@";; init) cmd_init;; adopt) cmd_adopt "$@";; import) cmd_import "$@";; new) cmd_new "$@";; set) cmd_set "$@";; passwd) cmd_passwd "$@";;
     *) usage; exit 1;;

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Worlds</h1>
+{% if error %}<pre class="flash error">Could not read the worlds from valheimctl:
+{{ error }}</pre>{% endif %}
+{% if rows is not none %}
+<table>
+  <thead><tr><th>#</th><th>World</th><th>Game port (UDP)</th><th>State</th><th>Players</th><th>Memory</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{{ r.world }}</td>
+      <td><a href="{{ url_for('world', nn=r.world) }}">{{ r.name }}</a></td>
+      <td>{{ r.game_port }}</td><td><span class="state {{ r.state }}">{{ r.state }}</span></td><td>{{ r.players }}</td><td>{{ r.memory }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6">No worlds are managed here yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

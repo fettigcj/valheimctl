@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Worlds{% endblock %} - valheimctl</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+<header>
+  <a class="brand" href="{{ url_for('index') }}">valheimctl</a>
+  <span class="grow"></span>
+  {% if user %}
+    <span class="who">{{ user }} ({{ role }})</span>
+    <form method="post" action="{{ url_for('logout') }}" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Log out</button></form>
+  {% elif auth_mode == 'admin' %}
+    <a href="{{ url_for('login') }}">Administrator login</a>
+  {% endif %}
+</header>
+<main>
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for cat, msg in messages %}<pre class="flash {{ cat }}">{{ msg }}</pre>{% endfor %}
+{% endwith %}
+{% block body %}{% endblock %}
+</main>
+</body>
+</html>

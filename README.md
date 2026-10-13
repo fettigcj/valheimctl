@@ -55,7 +55,7 @@ Details, the "honor original ports" option (2456, 2466, ...) and instance blocks
 | Podman | `BACKEND=podman` | [docs/podman.md](docs/podman.md) |
 | Kubernetes / K3s | `BACKEND=k8s` | [docs/kubernetes.md](docs/kubernetes.md) |
 
-More: [getting started](docs/getting-started.md), [the menu](docs/menu.md), [requirements and permissions](docs/requirements.md), [commands](docs/commands.md), [configuration](docs/configuration.md), [backups and restore](docs/backups.md),
+More: [getting started](docs/getting-started.md), [the menu](docs/menu.md), [the web console](docs/web.md), [requirements and permissions](docs/requirements.md), [commands](docs/commands.md), [configuration](docs/configuration.md), [backups and restore](docs/backups.md),
 [moving worlds between backends](docs/migration.md), [ports](docs/ports.md), [design and roadmap](docs/design.md).
 
 ## Safety rules built in
@@ -92,7 +92,7 @@ The full walkthrough, including letting players in, is in [docs/getting-started.
 
 ## Development
 `bash tests/smoke.sh` runs the whole tool against stub `docker`/`kubectl` programs (no real engine needed); the backup listing and restore
-scripts run for real against temporary directories. `python3 tests/test_menu.py` tests the menu's logic anywhere, and
+scripts run for real against temporary directories. `python3 tests/test_menu.py` tests the menu's logic anywhere, `python3 tests/test_web.py` tests the web console (needs Flask), and
 `python3 tests/pty_menu_test.py` drives the real menu through a terminal (Linux/macOS). Contributions that exercise a real Docker, Podman or cluster and report differences are
 the most useful thing right now.
 
